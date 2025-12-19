@@ -120,3 +120,28 @@ lazy val pipeline = (project in file("3-pipeline"))
     Test / fork := true,
     Test / javaOptions += s"-Duser.dir=${(ThisBuild / baseDirectory).value}/3-pipeline",
   )
+
+// 4-soc: SoC integration with AXI, peripherals, Verilator support
+lazy val soc = (project in file("4-soc"))
+  .dependsOn(pipeline)   // 幾乎一定要接 pipeline
+  .settings(
+    name := "mycpu-soc",
+    libraryDependencies ++= Seq(
+      "edu.berkeley.cs" %% "chisel3" % chiselVersion,
+      "edu.berkeley.cs" %% "chiseltest" % "0.6.0" % "test",
+      "edu.berkeley.cs" %% "firrtl" % "1.6.0",
+    ),
+    scalacOptions ++= Seq(
+      "-language:reflectiveCalls",
+      "-feature",
+      "-Xcheckinit",
+      "-Wconf:cat=deprecation:s",
+    ),
+    addCompilerPlugin(
+      "edu.berkeley.cs" % "chisel3-plugin" %
+        chiselVersion cross CrossVersion.full
+    ),
+    Test / fork := true,
+    Test / javaOptions +=
+      s"-Duser.dir=${(ThisBuild / baseDirectory).value}/4-soc",
+  )

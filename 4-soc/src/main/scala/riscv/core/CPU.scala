@@ -31,9 +31,8 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
 
 
       val mmu = Module (new MMU)
-      mmu.io.va =:= full_bus_address
+      mmu.io.va := full_bus_address
       val pa = mmu.io.pa
-
 
       // BusBundle to AXI4LiteMasterBundle adapter
       axi_master.io.bundle.address      := pa
