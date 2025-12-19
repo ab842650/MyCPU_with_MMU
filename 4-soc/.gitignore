@@ -1,0 +1,20 @@
+# Generated files
+csrc/nyancat-data.h
+
+# Build artifacts
+verilog/
+target/
+*.class
+*.jar
+
+# Verilator output
+obj_dir/
+
+# Trace files
+*.vcd
+*.fst
+
+# Editor files
+*.swp
+*~
+.idea/
