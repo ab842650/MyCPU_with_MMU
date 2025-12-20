@@ -98,9 +98,22 @@ class InstructionFetch extends Module {
     )
   )
 
+  val immu = Module(new MMU)
+  // feed VA = current PC
+  immu.io.va := pc
+  immu.io.enable := true.B
+  immu.io.isInst := true.B
+  immu.io.isLoad := false.B
+  immu.io.isStore := false.B
+  val pc_pa = immu.io.pa
+
+  when(io.instruction_valid && !io.stall_flag_ctrl) {
+    printf(p"[I-MMU] VA=0x${Hexadecimal(pc)} PA=0x${Hexadecimal(pc_pa)}\n")
+  }
+
   pc := next_pc
 
-  io.instruction_address := pc
+  io.instruction_address := pc_pa
   io.id_instruction      := Mux(io.instruction_valid, io.rom_instruction, InstructionsNop.nop)
 
   // BTB update interface - connect external update signals to BTB

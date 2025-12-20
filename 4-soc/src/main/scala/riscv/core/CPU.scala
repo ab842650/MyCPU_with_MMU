@@ -29,10 +29,17 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
       val full_bus_address = cpu.io.device_select ## cpu.io.memory_bundle
         .address(Parameters.AddrBits - Parameters.SlaveDeviceCountBits - 1, 0)
 
-
-      val mmu = Module (new MMU)
-      mmu.io.va := full_bus_address
+      // mmu
+      val mmu = Module(new MMU)
+      mmu.io.enable  := true.B
+      mmu.io.va      := full_bus_address
+      mmu.io.isInst  := false.B
+      mmu.io.isLoad  := cpu.io.memory_bundle.request && cpu.io.memory_bundle.read
+      mmu.io.isStore := cpu.io.memory_bundle.request && cpu.io.memory_bundle.write
       val pa = mmu.io.pa
+
+
+
 
       // BusBundle to AXI4LiteMasterBundle adapter
       axi_master.io.bundle.address      := pa
@@ -81,10 +88,10 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
           cpu.io.memory_bundle.request &&
           (cpu.io.memory_bundle.read || cpu.io.memory_bundle.write)
 
-      when(start_bus_transaction) {
-        bus_address_reg := next_bus_address
-        printf(p"[MMU] VA=0x${Hexadecimal(full_bus_address)} PA=0x${Hexadecimal(next_bus_address)}\n")
-      }
+      // when(start_bus_transaction) {
+      //   bus_address_reg := next_bus_address
+      //   printf(p"[MMU] VA=0x${Hexadecimal(full_bus_address)} PA=0x${Hexadecimal(next_bus_address)}\n")
+      // }
 
       io.bus_address := bus_address_reg
 

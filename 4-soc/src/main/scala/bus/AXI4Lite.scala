@@ -168,7 +168,7 @@ class AXI4LiteSlave(addrWidth: Int, dataWidth: Int) extends Module {
       when(io.channels.read_address_channel.ARVALID && ARREADY) {
         // Capture address
 
-        printf(p"[MEM-SLAVE][AR] addr=0x${Hexadecimal(io.channels.read_address_channel.ARADDR)}\n")
+        //printf(p"[MEM-SLAVE][AR] addr=0x${Hexadecimal(io.channels.read_address_channel.ARADDR)}\n")
 
         addr    := io.channels.read_address_channel.ARADDR
         ARREADY := false.B
@@ -198,7 +198,7 @@ class AXI4LiteSlave(addrWidth: Int, dataWidth: Int) extends Module {
         // Capture write address
         addr    := io.channels.write_address_channel.AWADDR
 
-        printf(p"[MEM-SLAVE][AW] addr=0x${Hexadecimal(io.channels.write_address_channel.AWADDR)}\n")
+        //printf(p"[MEM-SLAVE][AW] addr=0x${Hexadecimal(io.channels.write_address_channel.AWADDR)}\n")
 
         AWREADY := false.B
         WREADY  := true.B
