@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 package riscv.core
 
 import chisel3._
@@ -5,24 +6,48 @@ import riscv.Parameters
 
 class MMU extends Module {
   val io = IO(new Bundle {
-    val va = Input(UInt(Parameters.AddrWidth))
+    /* ========= I-side ========= */
+    val i_va    = Input(UInt(Parameters.AddrWidth))
+    val i_valid = Input(Bool())
 
-    val isInst    = Input(Bool())
-    val isLoad    = Input(Bool())
-    val isStore   = Input(Bool())
+    val i_pa    = Output(UInt(Parameters.AddrWidth))
+    val i_stall = Output(Bool())
+    val i_fault = Output(Bool())
 
-    // Control
-    val enable    = Input(Bool()) // from satp.mode != 0
+    /* ========= D-side ========= */
+    val d_va      = Input(UInt(Parameters.AddrWidth))
+    val d_valid   = Input(Bool())
+    val d_isLoad  = Input(Bool())
+    val d_isStore = Input(Bool())
 
-    val pa = Output(UInt(Parameters.AddrWidth))
-    val stall     = Output(Bool())
-    val fault     = Output(Bool())
-    val faultType = Output(UInt(2.W)) // inst/load/store
+    val d_pa    = Output(UInt(Parameters.AddrWidth))
+    val d_stall = Output(Bool())
+    val d_fault = Output(Bool())
 
+    /* ========= Control ========= */
+    val enable = Input(Bool()) // satp.mode != 0
   })
 
-  io.pa    := io.va + 0x100.U
-  io.stall := false.B
-  io.fault := false.B
-  io.faultType := 0.U
+  // Toy translation: +0x100 when enabled, otherwise pass-through
+  val i_pa_toy = io.i_va + 0x100.U
+  val d_pa_toy = io.d_va + 0x100.U
+
+  io.i_pa := Mux(io.enable, i_pa_toy, io.i_va)
+  io.d_pa := Mux(io.enable, d_pa_toy, io.d_va)
+
+  // For now: no stall, no fault
+  io.i_stall := false.B
+  io.d_stall := false.B
+  io.i_fault := false.B
+  io.d_fault := false.B
+
+  /* =============================
+   * Debug
+   * ============================= */
+  when(io.enable && io.i_valid) {
+    printf(p"[I-MMU] VA=0x${Hexadecimal(io.i_va)} PA=0x${Hexadecimal(io.i_pa)}\n")
+  }
+  when(io.enable && io.d_valid) {
+    printf(p"[D-MMU] VA=0x${Hexadecimal(io.d_va)} PA=0x${Hexadecimal(io.d_pa)}\n")
+  }
 }

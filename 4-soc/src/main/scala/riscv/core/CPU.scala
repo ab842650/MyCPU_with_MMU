@@ -31,14 +31,21 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
 
       // mmu
       val mmu = Module(new MMU)
-      mmu.io.enable  := true.B
-      mmu.io.va      := full_bus_address
-      mmu.io.isInst  := false.B
-      mmu.io.isLoad  := cpu.io.memory_bundle.request && cpu.io.memory_bundle.read
-      mmu.io.isStore := cpu.io.memory_bundle.request && cpu.io.memory_bundle.write
-      val pa = mmu.io.pa
+      mmu.io.enable := true.B
 
+      /* -------- I-side tie-off-------- */
+      mmu.io.i_va    := cpu.io.instruction_address
+      mmu.io.i_valid := io.instruction_valid
+      io.instruction_address :=mmu.io.i_pa
 
+      /* -------- D-side: translate bus address -------- */
+
+      mmu.io.d_va      := full_bus_address
+      mmu.io.d_valid   := cpu.io.memory_bundle.request && (cpu.io.memory_bundle.read || cpu.io.memory_bundle.write)
+      mmu.io.d_isLoad  := cpu.io.memory_bundle.request && cpu.io.memory_bundle.read
+      mmu.io.d_isStore := cpu.io.memory_bundle.request && cpu.io.memory_bundle.write
+
+      val pa = mmu.io.d_pa
 
 
       // BusBundle to AXI4LiteMasterBundle adapter
