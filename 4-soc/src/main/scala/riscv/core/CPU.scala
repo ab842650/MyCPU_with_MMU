@@ -18,7 +18,6 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
       val cpu = Module(new PipelinedCPU)
 
       // Connect instruction fetch interface
-      io.instruction_address   := cpu.io.instruction_address
       cpu.io.instruction       := io.instruction
       cpu.io.instruction_valid := io.instruction_valid
 
@@ -31,12 +30,15 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
 
       // mmu
       val mmu = Module(new MMU)
-      mmu.io.enable := true.B
+      mmu.io.enable := cpu.io.satp_out(31)
+      mmu.io.satp := cpu.io.satp_out
+      io.satp_out := cpu.io.satp_out
 
       /* -------- I-side tie-off-------- */
       mmu.io.i_va    := cpu.io.instruction_address
       mmu.io.i_valid := io.instruction_valid
       io.instruction_address :=mmu.io.i_pa
+    
 
       /* -------- D-side: translate bus address -------- */
 
@@ -95,10 +97,9 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
           cpu.io.memory_bundle.request &&
           (cpu.io.memory_bundle.read || cpu.io.memory_bundle.write)
 
-      // when(start_bus_transaction) {
-      //   bus_address_reg := next_bus_address
-      //   printf(p"[MMU] VA=0x${Hexadecimal(full_bus_address)} PA=0x${Hexadecimal(next_bus_address)}\n")
-      // }
+      when(start_bus_transaction) {
+        bus_address_reg := next_bus_address
+      }
 
       io.bus_address := bus_address_reg
 

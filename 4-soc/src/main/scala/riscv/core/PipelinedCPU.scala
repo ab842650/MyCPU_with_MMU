@@ -380,6 +380,8 @@ class PipelinedCPU extends Module {
   csr_regs.io.reg_write_data_ex      := ex.io.csr_write_data
   csr_regs.io.debug_reg_read_address := io.csr_debug_read_address
   io.csr_debug_read_data             := csr_regs.io.debug_reg_read_data
+  //satp
+  io.satp_out := csr_regs.io.satp_out
 
   // Initialize unused CPUBundle signals (used by wrapper, not by pipeline core)
   io.bus_address                                 := 0.U

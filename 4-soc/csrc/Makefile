@@ -1,4 +1,4 @@
-CROSS_COMPILE ?= $(HOME)/rv/toolchain/bin/riscv-none-elf-
+CROSS_COMPILE ?= /Users/guxiaozheng/riscv-none-elf-gcc/bin/riscv-none-elf-
 
 ASFLAGS = -march=rv32i_zicsr -mabi=ilp32
 CFLAGS = -O0 -Wall -march=rv32i_zicsr -mabi=ilp32
@@ -15,13 +15,19 @@ OBJCOPY := $(CROSS_COMPILE)objcopy
 # Clear the .DEFAULT_GOAL special variable
 .DEFAULT_GOAL :=
 
-all: nyancat.asmbin uart.asmbin
+all: nyancat.asmbin uart.asmbin mmutest.asmbin
 
 # All programs use proper init.S with ABI compliance and .bss clearing
 nyancat.asmbin: nyancat.c nyancat-data.h init.o
 	$(CC) $(CFLAGS) -DNYANCAT_COMPRESSION_DELTA=$(NYANCAT_COMPRESSION_DELTA) -c -o nyancat.o nyancat.c
 	$(CROSS_COMPILE)ld -o nyancat.elf -T link.lds $(LDFLAGS) nyancat.o init.o
 	$(OBJCOPY) -O binary -j .text -j .data nyancat.elf $@
+
+mmutest.asmbin: mmutest.c init.o
+	$(CC) $(CFLAGS)  -c -o mmutest.o mmutest.c
+	$(CROSS_COMPILE)ld -o mmutest.elf -T link.lds $(LDFLAGS) mmutest.o init.o
+	$(OBJCOPY) -O binary -j .text -j .data mmutest.elf $@
+
 
 uart.asmbin: uart.c mmio.h init.o
 	$(CC) $(CFLAGS) -c -o uart.o uart.c
@@ -47,10 +53,10 @@ endif
 # Nyancat build depends on generated data
 nyancat.o: nyancat.c nyancat-data.h
 
-update: nyancat.asmbin uart.asmbin
-	cp -f nyancat.asmbin uart.asmbin ../src/main/resources
+update: nyancat.asmbin uart.asmbin mmutest.asmbin
+	cp -f nyancat.asmbin mmutest.asmbin uart.asmbin ../src/main/resources
 	@echo ""
-	@echo "Updated nyancat.asmbin and uart.asmbin to ../src/main/resources"
+	@echo "Updated nyancat.asmbin and uart.asmbin  and mmutest.asmbin to ../src/main/resources"
 
 clean:
 	$(RM) *.o *.elf *.asmbin init_minimal.S nyancat-data.h

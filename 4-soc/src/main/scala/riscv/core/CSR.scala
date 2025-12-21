@@ -32,6 +32,7 @@ object CSRRegister {
   val MCAUSE   = 0x342.U(Parameters.CSRRegisterAddrWidth)
   val CycleL   = 0xc00.U(Parameters.CSRRegisterAddrWidth)
   val CycleH   = 0xc80.U(Parameters.CSRRegisterAddrWidth)
+  val SATP = 0x180.U(Parameters.CSRRegisterAddrWidth) // for mmu
 }
 
 class CSR extends Module {
@@ -46,7 +47,12 @@ class CSR extends Module {
     val debug_reg_read_data = Output(UInt(Parameters.DataWidth))
 
     val clint_access_bundle = Flipped(new CSRDirectAccessBundle)
+
+    val satp_out = Output(UInt(Parameters.DataWidth))
   })
+
+  val satp = RegInit(0.U(Parameters.DataWidth))
+  io.satp_out := satp
 
   val mstatus  = RegInit(UInt(Parameters.DataWidth), 0.U)
   val mie      = RegInit(UInt(Parameters.DataWidth), 0.U)
@@ -65,6 +71,7 @@ class CSR extends Module {
       CSRRegister.MCAUSE   -> mcause,
       CSRRegister.CycleL   -> cycles(31, 0),
       CSRRegister.CycleH   -> cycles(63, 32),
+      CSRRegister.SATP -> satp,
     )
   cycles := cycles + 1.U
 
@@ -120,6 +127,8 @@ class CSR extends Module {
       mtvec := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_ex === CSRRegister.MSCRATCH) {
       mscratch := io.reg_write_data_ex
+    }.elsewhen(io.reg_write_address_ex === CSRRegister.SATP) {
+    satp := io.reg_write_data_ex
     }
   }
 }
