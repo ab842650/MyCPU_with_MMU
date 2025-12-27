@@ -40,9 +40,14 @@ class CLINT extends Module {
     io.jump_address,
     io.instruction_address_if,
   )
-  val mstatus_disable_interrupt = io.csr_bundle.mstatus(31, 4) ## 0.U(1.W) ## io.csr_bundle.mstatus(2, 0)
+  // Trap entry: MIE (bit 3) -> MPIE (bit 7), then clear MIE
+  val mstatus_disable_interrupt =
+    io.csr_bundle.mstatus(31, 8) ## io.csr_bundle.mstatus(3) ## io.csr_bundle.mstatus(6, 4) ## 0.U(1.W) ## io.csr_bundle
+      .mstatus(2, 0)
+  // mret: MPIE (bit 7) -> MIE (bit 3), then set MPIE to 1
   val mstatus_recover_interrupt =
-    io.csr_bundle.mstatus(31, 4) ## io.csr_bundle.mstatus(7) ## io.csr_bundle.mstatus(2, 0)
+    io.csr_bundle.mstatus(31, 8) ## 1.U(1.W) ## io.csr_bundle.mstatus(6, 4) ## io.csr_bundle.mstatus(7) ## io.csr_bundle
+      .mstatus(2, 0)
 
   // Check individual interrupt source enable based on interrupt type
   val interrupt_source_enabled = Mux(
@@ -50,6 +55,9 @@ class CLINT extends Module {
     interrupt_enable_timer,
     interrupt_enable_external
   )
+
+  // ---- default assignments (avoid unconnected wires) ----
+  io.csr_bundle.mtval_write_data := io.csr_bundle.mtval
 
   when(io.instruction_id === InstructionsEnv.ecall || io.instruction_id === InstructionsEnv.ebreak) {
     io.csr_bundle.mstatus_write_data := mstatus_disable_interrupt
@@ -66,6 +74,7 @@ class CLINT extends Module {
     io.csr_bundle.direct_write_enable := true.B
     io.id_interrupt_assert            := true.B
     io.id_interrupt_handler_address   := io.csr_bundle.mtvec
+    io.csr_bundle.mtval_write_data := 0.U
   }.elsewhen(io.interrupt_flag =/= InterruptStatus.None && interrupt_enable_global && interrupt_source_enabled) {
     io.csr_bundle.mstatus_write_data  := mstatus_disable_interrupt
     io.csr_bundle.mepc_write_data     := instruction_address
@@ -73,6 +82,7 @@ class CLINT extends Module {
     io.csr_bundle.direct_write_enable := true.B
     io.id_interrupt_assert            := true.B
     io.id_interrupt_handler_address   := io.csr_bundle.mtvec
+    io.csr_bundle.mtval_write_data := 0.U
   }.elsewhen(io.instruction_id === InstructionsRet.mret) {
     io.csr_bundle.mstatus_write_data  := mstatus_recover_interrupt
     io.csr_bundle.mepc_write_data     := io.csr_bundle.mepc
@@ -80,6 +90,7 @@ class CLINT extends Module {
     io.csr_bundle.direct_write_enable := true.B
     io.id_interrupt_assert            := true.B
     io.id_interrupt_handler_address   := io.csr_bundle.mepc
+    io.csr_bundle.mtval_write_data := 0.U
   }.otherwise {
     io.csr_bundle.mstatus_write_data  := io.csr_bundle.mstatus
     io.csr_bundle.mepc_write_data     := io.csr_bundle.mepc

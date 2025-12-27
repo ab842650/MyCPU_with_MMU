@@ -13,23 +13,54 @@ object MemoryAccessStates extends ChiselEnum {
   val Idle, Read, Write = Value
 }
 
+/**
+ * Memory Access Stage (MEM) of the Pipeline
+ *
+ * Handles load/store operations with AXI4-Lite bus interface. Implements a
+ * simple state machine for bus transactions with proper stall generation.
+ *
+ * Key Features:
+ * - Load operations: LB, LBU, LH, LHU, LW with byte/halfword extraction
+ * - Store operations: SB, SH, SW with byte strobes
+ * - Pipeline stall generation during bus transactions
+ * - Data forwarding to EX stage for load-use hazard mitigation
+ * - Latched control signals to handle stall release timing
+ *
+ * State Machine:
+ * - Idle: Monitor memory_read_enable/memory_write_enable, start transactions
+ * - Read: Wait for bus.read_valid, extract data, release stall
+ * - Write: Wait for bus.write_valid (BRESP), release stall
+ *
+ * Critical Timing:
+ * - PipelineRegister is purely sequential (io.out := reg), NOT combinational
+ *   bypass. During bus transactions, mem_stall keeps pipeline registers frozen,
+ *   so io.funct3 and other signals remain stable.
+ * - Control signals (regs_write_source, regs_write_address, regs_write_enable)
+ *   are latched for MEM2WB to ensure correct writeback after read completes.
+ * - forward_to_ex uses latched values ONLY while in Read state; after
+ *   completion, the new instruction's values must be used.
+ */
 class MemoryAccess extends Module {
   val io = IO(new Bundle() {
-    val alu_result          = Input(UInt(Parameters.DataWidth)) // used as memory address
+    val alu_result          = Input(UInt(Parameters.DataWidth))                 // used as memory address
     val reg2_data           = Input(UInt(Parameters.DataWidth))
     val memory_read_enable  = Input(Bool())
     val memory_write_enable = Input(Bool())
     val funct3              = Input(UInt(3.W))
     val regs_write_source   = Input(UInt(2.W))
+    val regs_write_address  = Input(UInt(Parameters.PhysicalRegisterAddrWidth)) // destination register
+    val regs_write_enable   = Input(Bool())                                     // register write enable
     val csr_read_data       = Input(UInt(Parameters.DataWidth))
-    val instruction_address = Input(UInt(Parameters.AddrWidth)) // For JAL/JALR forwarding (PC+4)
+    val instruction_address = Input(UInt(Parameters.AddrWidth))                 // For JAL/JALR forwarding (PC+4)
 
     val wb_memory_read_data = Output(UInt(Parameters.DataWidth))
     val forward_to_ex       = Output(UInt(Parameters.DataWidth))
     val ctrl_stall_flag     = Output(Bool()) // stall when memory access is not finished
-    // Output the correct regs_write_source for MEM2WB pipeline register
-    // This preserves the load instruction's regs_write_source when stall releases
-    val wb_regs_write_source = Output(UInt(2.W))
+    // Output the correct regs_write_* for MEM2WB pipeline register
+    // These preserve the load instruction's values when stall releases
+    val wb_regs_write_source  = Output(UInt(2.W))
+    val wb_regs_write_address = Output(UInt(Parameters.PhysicalRegisterAddrWidth))
+    val wb_regs_write_enable  = Output(Bool())
 
     val bus = new BusBundle
   })
@@ -41,17 +72,19 @@ class MemoryAccess extends Module {
   val latched_memory_read_data = RegInit(0.U(Parameters.DataWidth))
 
   // Capture control signals when entering Read state
-  // PipelineRegister has combinational bypass (out := io.in when ~stall), so when
-  // stall releases on read_valid, signals from ex2mem immediately change to the NEXT
-  // instruction's value. By latching them when we start the read, we preserve the
-  // correct values for the load instruction throughout the bus transaction.
-  val latched_regs_write_source = RegInit(0.U(2.W))
-  val latched_funct3            = RegInit(0.U(3.W))
-  val latched_address_index     = RegInit(0.U(log2Up(Parameters.WordSize).W))
+  // Although PipelineRegister is purely sequential (io.out := reg), we still latch
+  // regs_write_source/address/enable for MEM2WB because when read_valid arrives,
+  // mem_stall releases and MEM2WB captures at the clock edge. The latched values
+  // ensure the load instruction's writeback info is preserved for one extra cycle.
+  val latched_regs_write_source  = RegInit(0.U(2.W))
+  val latched_regs_write_address = RegInit(0.U(Parameters.PhysicalRegisterAddrWidth))
+  val latched_regs_write_enable  = RegInit(false.B)
+  // Note: latched_funct3 and latched_address_index were removed - not needed because
+  // PipelineRegister is purely sequential and these signals stay stable during stall
 
   // Track when a read just completed so we can extend the validity of
   // latched control signals for one more cycle. This handles the case where the
-  // dependent instruction arrives in EX on the cycle AFTER the load completes.
+  // dependent instruction arrives in EX on the cycle after the load completes.
   // Without this, forward_to_ex would show the wrong value (ALU result instead of
   // loaded data) because effective_regs_write_source switches too early.
   val read_just_completed = RegInit(false.B)
@@ -60,13 +93,16 @@ class MemoryAccess extends Module {
   def on_bus_transaction_finished() = {
     mem_access_state   := MemoryAccessStates.Idle
     io.ctrl_stall_flag := false.B
-    // NOTE: read_just_completed is set ONLY in Read completion path, NOT here
+    // Note: read_just_completed is set only in Read completion path, not here
     // Setting it for Write completions was a bug causing wrong wb_regs_write_source
   }
 
-  // Clear read_just_completed on the cycle after it was set
-  // This ensures latched values are used for exactly one cycle after completion
-  when(read_just_completed && mem_access_state === MemoryAccessStates.Idle) {
+  // Clear read_just_completed on the cycle after it was set.
+  // This ensures latched values are used for exactly one cycle after completion.
+  // The original implementation had a bug where this signal would
+  // not be cleared if a new memory transaction started in the same cycle, causing
+  // the signal to get "stuck" high. The corrected logic is unconditional.
+  when(read_just_completed) {
     read_just_completed := false.B
   }
 
@@ -81,19 +117,16 @@ class MemoryAccess extends Module {
   io.wb_memory_read_data := latched_memory_read_data // Use latched value
   io.ctrl_stall_flag     := false.B
 
-  // Misaligned access detection
+  // Misaligned access handling:
   // RISC-V spec allows implementation-defined behavior for misaligned accesses.
-  // Current implementation: No exception raised; hardware handles byte extraction.
-  // For strict compliance, uncomment below to detect and signal misaligned access:
-  //
-  // val is_halfword = io.funct3 === InstructionsTypeL.lh ||
-  //                   io.funct3 === InstructionsTypeL.lhu ||
-  //                   io.funct3 === InstructionsTypeS.sh
-  // val is_word = io.funct3 === InstructionsTypeL.lw ||
-  //               io.funct3 === InstructionsTypeS.sw
-  // val misaligned = (is_halfword && mem_address_index(0)) ||
-  //                  (is_word && mem_address_index =/= 0.U)
-  // io.misaligned_exception := misaligned && (io.memory_read_enable || io.memory_write_enable)
+  // Current implementation supports within-word misalignment for byte and halfword:
+  // - LB/LBU/SB: Always aligned (single byte), fully supported
+  // - LH/LHU/SH at offset 0,1,2: Supported (bytes within same word)
+  // - LH/LHU/SH at offset 3: Best-effort (returns bytes 2-3, crosses word boundary)
+  // - LW/SW at offset 0: Supported (word-aligned)
+  // - LW/SW at non-zero offset: Unsupported (crosses word boundary, returns partial data)
+  // Cross-word-boundary accesses would require two bus transactions and are not implemented.
+  // For strict compliance with exception-based handling, add misalignment trap logic.
 
   // State machine: handle Read/Write completion FIRST (independent of enable signals)
   // This fixes a critical bug where the state machine would get stuck if the pipeline
@@ -105,14 +138,15 @@ class MemoryAccess extends Module {
     when(io.bus.read_valid) {
       val data = io.bus.read_data
       // Compute the processed data (byte/halfword extraction with sign extension)
-      // Use latched_funct3 and latched_address_index instead of io.funct3/mem_address_index
-      // because stall releases on this cycle and those signals change to NEXT instruction's values
+      // Use io.funct3 and mem_address_index directly - PipelineRegister is purely
+      // sequential (io.out := reg), NOT combinational bypass, so these signals
+      // remain stable during the entire bus transaction while mem_stall is asserted.
       val processed_data = MuxLookup(
-        latched_funct3,
+        io.funct3,
         0.U,
         IndexedSeq(
           InstructionsTypeL.lb -> MuxLookup(
-            latched_address_index,
+            mem_address_index,
             Cat(Fill(24, data(31)), data(31, 24)),
             IndexedSeq(
               0.U -> Cat(Fill(24, data(7)), data(7, 0)),
@@ -121,7 +155,7 @@ class MemoryAccess extends Module {
             )
           ),
           InstructionsTypeL.lbu -> MuxLookup(
-            latched_address_index,
+            mem_address_index,
             Cat(Fill(24, 0.U), data(31, 24)),
             IndexedSeq(
               0.U -> Cat(Fill(24, 0.U), data(7, 0)),
@@ -129,32 +163,40 @@ class MemoryAccess extends Module {
               2.U -> Cat(Fill(24, 0.U), data(23, 16))
             )
           ),
-          InstructionsTypeL.lh -> Mux(
-            latched_address_index === 0.U,
-            Cat(Fill(16, data(15)), data(15, 0)),
-            Cat(Fill(16, data(31)), data(31, 16))
+          InstructionsTypeL.lh -> MuxLookup(
+            mem_address_index,
+            Cat(Fill(16, data(31)), data(31, 16)), // offset 3: best-effort (crosses word boundary)
+            IndexedSeq(
+              0.U -> Cat(Fill(16, data(15)), data(15, 0)), // bytes 0-1
+              1.U -> Cat(Fill(16, data(23)), data(23, 8)), // bytes 1-2
+              2.U -> Cat(Fill(16, data(31)), data(31, 16)) // bytes 2-3
+            )
           ),
-          InstructionsTypeL.lhu -> Mux(
-            latched_address_index === 0.U,
-            Cat(Fill(16, 0.U), data(15, 0)),
-            Cat(Fill(16, 0.U), data(31, 16))
+          InstructionsTypeL.lhu -> MuxLookup(
+            mem_address_index,
+            Cat(Fill(16, 0.U), data(31, 16)), // offset 3: best-effort (crosses word boundary)
+            IndexedSeq(
+              0.U -> Cat(Fill(16, 0.U), data(15, 0)), // bytes 0-1
+              1.U -> Cat(Fill(16, 0.U), data(23, 8)), // bytes 1-2
+              2.U -> Cat(Fill(16, 0.U), data(31, 16)) // bytes 2-3
+            )
           ),
           InstructionsTypeL.lw -> data
         )
       )
       // Store in register for persistence after read_valid goes low
       latched_memory_read_data := processed_data
-      // Also output immediately for forwarding on THIS cycle
+      // Also output immediately for forwarding on this cycle
       // Without this, the forwarding path would see the old latch value (0)
       io.wb_memory_read_data := processed_data
-      // Signal that a READ just completed - used by wb_effective_regs_write_source MUX
+      // Signal that a read just completed - used by wb_effective_regs_write_source MUX
       // to extend latched control signals for one more cycle
       read_just_completed := true.B
       on_bus_transaction_finished()
     }
   }.elsewhen(mem_access_state === MemoryAccessStates.Write) {
     // In Write state: wait for write_valid (BRESP) to complete transaction
-    // CRITICAL: Must keep stall asserted until BRESP received.
+    // Must keep stall asserted until BRESP received.
     // The posted-write optimization (releasing stall on write_data_accepted)
     // was buggy: while BRESP is pending, the pipeline advances but the state
     // machine remains in Write state, causing any new load/store in MEM stage
@@ -173,12 +215,12 @@ class MemoryAccess extends Module {
       io.ctrl_stall_flag := true.B
       io.bus.read        := true.B
       io.bus.request     := true.B
-      // Capture ALL control signals IMMEDIATELY when read starts
-      // These must be latched because PipelineRegister's combinational bypass
-      // will change them on stall release BEFORE the read_valid processing completes
-      latched_regs_write_source := io.regs_write_source
-      latched_funct3            := io.funct3
-      latched_address_index     := mem_address_index
+      // Capture control signals for MEM2WB when read starts
+      // These are latched so that when read_valid arrives and stall releases,
+      // MEM2WB can still capture the correct writeback info for the load instruction
+      latched_regs_write_source  := io.regs_write_source
+      latched_regs_write_address := io.regs_write_address
+      latched_regs_write_enable  := io.regs_write_enable
       when(io.bus.granted) {
         mem_access_state := MemoryAccessStates.Read
       }
@@ -196,20 +238,25 @@ class MemoryAccess extends Module {
         ).U)
       }.elsewhen(io.funct3 === InstructionsTypeS.sh) {
         when(mem_address_index === 0.U) {
-          for (i <- 0 until Parameters.WordSize / 2) {
-            io.bus.write_strobe(i) := true.B
-          }
-          // Fix: Use -1 for correct 16-bit slice (was 17 bits)
-          io.bus.write_data := io.reg2_data(Parameters.WordSize / 2 * Parameters.ByteBits - 1, 0)
+          // Offset 0: write to bytes 0-1
+          io.bus.write_strobe(0) := true.B
+          io.bus.write_strobe(1) := true.B
+          io.bus.write_data      := io.reg2_data(15, 0)
+        }.elsewhen(mem_address_index === 1.U) {
+          // Offset 1: write to bytes 1-2
+          io.bus.write_strobe(1) := true.B
+          io.bus.write_strobe(2) := true.B
+          io.bus.write_data      := io.reg2_data(15, 0) << 8.U
+        }.elsewhen(mem_address_index === 2.U) {
+          // Offset 2: write to bytes 2-3
+          io.bus.write_strobe(2) := true.B
+          io.bus.write_strobe(3) := true.B
+          io.bus.write_data      := io.reg2_data(15, 0) << 16.U
         }.otherwise {
-          for (i <- Parameters.WordSize / 2 until Parameters.WordSize) {
-            io.bus.write_strobe(i) := true.B
-          }
-          // Fix: Use -1 for correct 16-bit slice (was 17 bits)
-          io.bus.write_data := io.reg2_data(
-            Parameters.WordSize / 2 * Parameters.ByteBits - 1,
-            0
-          ) << (Parameters.WordSize / 2 * Parameters.ByteBits)
+          // Offset 3: best-effort, write to bytes 2-3 (crosses word boundary)
+          io.bus.write_strobe(2) := true.B
+          io.bus.write_strobe(3) := true.B
+          io.bus.write_data      := io.reg2_data(15, 0) << 16.U
         }
       }.elsewhen(io.funct3 === InstructionsTypeS.sw) {
         for (i <- 0 until Parameters.WordSize) {
@@ -223,28 +270,64 @@ class MemoryAccess extends Module {
     }
   }
 
-  // Forward to EX stage: Select correct data source for forwarding
-  // - Memory loads: forward the loaded data (wb_memory_read_data)
-  // - CSR instructions: forward CSR read data
-  // - ALU operations: forward ALU result
+  // Forwarding and writeback have different timing requirements!
   //
-  // For forwarding to EX, only use latched_regs_write_source when actually
-  // IN Read state. When read_just_completed is true, a NEW instruction is in MEM stage,
-  // so forwarding must use THAT instruction's regs_write_source (from io.regs_write_source).
+  // When a load completes (read_just_completed = true):
+  // - State transitions: Read → Idle (same cycle as read_valid)
+  // - mem_stall releases, allowing MEM2WB to capture at clock edge
+  // - We use latched values for writeback to preserve the load's info
   //
-  // The previous bug: When read_just_completed was true, we used latched_regs_write_source
-  // (FromMemory=1) even though LUI (FromALU=0) was now in MEM stage. This caused forward_to_ex
-  // to output stale memory read data instead of the LUI's ALU result.
+  // For forwarding (forward_to_ex):
+  // - Only use latched values while in Read state (during the bus transaction)
+  // - After completion, the new instruction is in MEM stage, so use its values
+  // - This allows correct forwarding from the new instruction to EX stage
+  //
+  // For writeback (wb_regs_write_source):
+  // - Must use latched values for one extra cycle after read completes
+  // - Because MEM2WB captures at clock edge after read_just_completed is set
+  // - Without this, MEM2WB captures the new instruction's regs_write_source,
+  //   causing WB to use ALU result instead of loaded data!
+  //
+  // Bug pattern this fixes:
+  // - LW completes → read_just_completed = true
+  // - io.regs_write_source = FromALU (from next instruction)
+  // - MEM2WB captures FromALU instead of FromMemory
+  // - WB writes ALU result to register instead of loaded data!
+
+  // For writeback: only use latched values while waiting for read_valid
+  // When read_valid arrives, ex2mem still holds the load so io.* are correct
+  // Bug fix: Using in_read_or_just_completed caused new instruction's rd to be
+  // replaced by latched rd when read_just_completed was true
+  val in_active_read = mem_access_state === MemoryAccessStates.Read && !io.bus.read_valid
+
+  // For forwarding data source selection (forward_to_ex)
   val forward_regs_write_source = Mux(
-    mem_access_state === MemoryAccessStates.Read,
+    in_active_read,
     latched_regs_write_source,
     io.regs_write_source
   )
-  // CRITICAL FIX: Handle JAL/JALR forwarding correctly
-  // JAL/JALR instructions set rd = PC + 4, computed in WriteBack stage.
-  // When JAL/JALR is in MEM stage, forwarding must provide PC+4, NOT ALU result.
-  // Previously, NextInstructionAddress fell through to default (alu_result),
-  // causing SW ra to get wrong value (jump target instead of return address).
+
+  val wb_effective_regs_write_source = Mux(
+    in_active_read,
+    latched_regs_write_source,
+    io.regs_write_source
+  )
+  val wb_effective_regs_write_address = Mux(
+    in_active_read,
+    latched_regs_write_address,
+    io.regs_write_address
+  )
+  val wb_effective_regs_write_enable = Mux(
+    in_active_read,
+    latched_regs_write_enable,
+    io.regs_write_enable
+  )
+
+  // Forward to EX stage: Select correct data source based on instruction type
+  // - Memory loads (FromMemory): forward loaded data
+  // - CSR instructions (FromCSR): forward CSR read data
+  // - JAL/JALR (NextInstructionAddress): forward PC+4 (return address)
+  // - ALU operations (default): forward ALU result
   io.forward_to_ex := MuxLookup(forward_regs_write_source, io.alu_result)(
     Seq(
       RegWriteSource.Memory                 -> io.wb_memory_read_data,
@@ -253,18 +336,8 @@ class MemoryAccess extends Module {
     )
   )
 
-  // For writeback, ONLY use latched values while actually IN Read state.
-  // When read_just_completed is true, the load has ALREADY completed and a NEW
-  // instruction is now in MEM stage. We must use io.regs_write_source for that
-  // new instruction, NOT the latched value from the completed load.
-  // Bug fix: Previously this included `|| read_just_completed` which corrupted
-  // the regs_write_source for instructions following loads (e.g., ADDI after LW).
-  val wb_effective_regs_write_source = Mux(
-    mem_access_state === MemoryAccessStates.Read,
-    latched_regs_write_source,
-    io.regs_write_source
-  )
-  // Pass effective_regs_write_source to MEM2WB pipeline register
-  // This ensures WB stage gets the correct regs_write_source even when stall releases
-  io.wb_regs_write_source := wb_effective_regs_write_source
+  // Pass to MEM2WB pipeline register for WB stage data source selection
+  io.wb_regs_write_source  := wb_effective_regs_write_source
+  io.wb_regs_write_address := wb_effective_regs_write_address
+  io.wb_regs_write_enable  := wb_effective_regs_write_enable
 }

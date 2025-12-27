@@ -9,9 +9,29 @@ import chisel3.experimental.ChiselEnum
 import chisel3.util._
 import riscv.Parameters
 
+/**
+ * AXI4-Lite Bus Protocol Implementation
+ *
+ * Implements ARM AMBA AXI4-Lite protocol for simple memory-mapped I/O.
+ * AXI4-Lite is a subset of full AXI4, optimized for low-throughput
+ * control/status register access with single-beat transactions only.
+ *
+ * Protocol Characteristics:
+ * - Single-beat (non-burst) transactions only
+ * - Fixed data width (32-bit in this implementation)
+ * - Separate read and write channels (can operate independently)
+ * - VALID/READY handshake on all channels
+ *
+ * Channel Summary:
+ * - Write Address (AW): Master provides write address
+ * - Write Data (W): Master provides write data with byte strobes
+ * - Write Response (B): Slave acknowledges write completion
+ * - Read Address (AR): Master provides read address
+ * - Read Data (R): Slave returns read data with response
+ */
 object AXI4Lite {
-  val protWidth = 3
-  val respWidth = 2
+  val protWidth = 3 // Protection type width (privileged, secure, instruction/data)
+  val respWidth = 2 // Response width (OKAY=0, EXOKAY=1, SLVERR=2, DECERR=3)
 }
 
 class AXI4LiteWriteAddressChannel(addrWidth: Int) extends Bundle {
@@ -167,9 +187,6 @@ class AXI4LiteSlave(addrWidth: Int, dataWidth: Int) extends Module {
     is(AXI4LiteStates.ReadAddr) {
       when(io.channels.read_address_channel.ARVALID && ARREADY) {
         // Capture address
-
-        //printf(p"[MEM-SLAVE][AR] addr=0x${Hexadecimal(io.channels.read_address_channel.ARADDR)}\n")
-
         addr    := io.channels.read_address_channel.ARADDR
         ARREADY := false.B
         read    := true.B
@@ -197,9 +214,6 @@ class AXI4LiteSlave(addrWidth: Int, dataWidth: Int) extends Module {
       when(io.channels.write_address_channel.AWVALID && AWREADY) {
         // Capture write address
         addr    := io.channels.write_address_channel.AWADDR
-
-        //printf(p"[MEM-SLAVE][AW] addr=0x${Hexadecimal(io.channels.write_address_channel.AWADDR)}\n")
-
         AWREADY := false.B
         WREADY  := true.B
         state   := AXI4LiteStates.WriteData
@@ -348,14 +362,6 @@ class AXI4LiteMaster(addrWidth: Int, dataWidth: Int) extends Module {
         write_valid := true.B
         state       := AXI4LiteStates.Idle
       }
-    }
-
-    // ReadAddr and WriteAddr states no longer used - kept for compatibility
-    is(AXI4LiteStates.ReadAddr) {
-      state := AXI4LiteStates.Idle // Should never reach here
-    }
-    is(AXI4LiteStates.WriteAddr) {
-      state := AXI4LiteStates.Idle // Should never reach here
     }
   }
 }

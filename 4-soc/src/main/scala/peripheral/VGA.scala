@@ -15,15 +15,21 @@ import riscv.Parameters
  *
  * Memory map (Base: 0x20000000):
  *   0x00: ID          - Peripheral identification (RO: 0x56474131 = 'VGA1')
- *   0x04: STATUS      - Vblank status, safe to swap, upload busy, current frame
+ *   0x04: STATUS      - [31:16] timing_error_count, [7:4] frame, [2] busy, [1] safe, [0] vblank
  *   0x08: INTR_STATUS - Vblank interrupt flag (W1C)
  *   0x10: UPLOAD_ADDR - Framebuffer upload address (nibble index + frame)
  *   0x14: STREAM_DATA - 8 pixels packed in 32-bit word (auto-increment)
  *   0x20: CTRL        - Display enable, blank, swap request, frame select, interrupt enable
- *   0x24-0x60: PALETTE[0-15] - 6-bit VGA colors (RRGGBB)
+ *   0x24-0x60: PALETTE[0-15] - 16 entries, 6-bit VGA colors (RRGGBB)
  *
  * VGA timing: 640×480 @ 72Hz
  *   H_TOTAL=832, V_TOTAL=520, pixel clock=31.5 MHz
+ *
+ * Lost-sync detection:
+ *   The timing_error_count field in STATUS tracks timing anomalies in the pixel
+ *   clock domain. Errors indicate counter overflow (h_count >= H_TOTAL or
+ *   v_count >= V_TOTAL) which should never occur in normal operation. Non-zero
+ *   values suggest clock domain issues, configuration errors, or hardware faults.
  */
 class VGA extends Module {
   val io = IO(new Bundle {
@@ -60,6 +66,11 @@ class VGA extends Module {
   val LEFT_MARGIN    = (H_ACTIVE - DISPLAY_WIDTH) / 2
   val TOP_MARGIN     = (V_ACTIVE - DISPLAY_HEIGHT) / 2
 
+  // Fixed-point multiplier for divide-by-SCALE_FACTOR (6):
+  // x / 6 ≈ x * (65536/6) >> 16 = x * 10923 >> 16
+  // Using ceil(65536/6) = 10923 for proper rounding
+  val DIV_BY_SCALE_MULT = 10923
+
   // Framebuffer parameters
   val NUM_FRAMES       = 12
   val PIXELS_PER_FRAME = 4096
@@ -78,7 +89,7 @@ class VGA extends Module {
     val STREAM_DATA  = 0x14 // Pixel data streaming port
     val CTRL         = 0x20 // Control register
     val PALETTE_BASE = 0x24 // Palette entries start here
-    val PALETTE_END  = 0x60 // Palette entries end here (15 entries: 0x24-0x5C)
+    val PALETTE_END  = 0x64 // Palette entries end here (16 entries: 0x24-0x60)
   }
 
   // Peripheral identification constant
@@ -108,8 +119,9 @@ class VGA extends Module {
   val ctrl_vblank_ie = ctrlReg(8)
 
   // Cross-clock-domain wires
-  val wire_in_vblank  = Wire(Bool())
-  val wire_curr_frame = Wire(UInt(4.W))
+  val wire_in_vblank       = Wire(Bool())
+  val wire_curr_frame      = Wire(UInt(4.W))
+  val wire_timing_err_flag = Wire(Bool()) // Pulse/toggle from pixel domain on timing error
 
   withClock(sysClk) {
     // Upload address fields (clamp frame index to valid range)
@@ -122,6 +134,18 @@ class VGA extends Module {
     val vblank_synced     = RegNext(vblank_sync1)
     val curr_frame_sync1  = RegNext(wire_curr_frame)
     val curr_frame_synced = RegNext(curr_frame_sync1)
+
+    // CDC for timing error: Toggle-based crossing (avoids torn multi-bit reads)
+    // Pixel domain toggles wire_timing_err_flag on each error event.
+    // Sys domain detects toggle edges and increments local counter.
+    val timing_err_sync1   = RegNext(wire_timing_err_flag)
+    val timing_err_sync2   = RegNext(timing_err_sync1)
+    val timing_err_sync3   = RegNext(timing_err_sync2)
+    val timing_err_edge    = timing_err_sync2 =/= timing_err_sync3 // Toggle edge detected
+    val timing_error_count = RegInit(0.U(16.W))
+    when(timing_err_edge && timing_error_count < "hFFFF".U) {
+      timing_error_count := timing_error_count + 1.U
+    }
 
     // Status signals
     val status_in_vblank    = vblank_synced
@@ -151,7 +175,7 @@ class VGA extends Module {
     val palette_idx      = (addr - Reg.PALETTE_BASE.U) >> 2
 
     // AXI4-Lite Read handling
-    // CRITICAL: read_valid must ONLY be asserted when peripheral has valid data ready
+    // read_valid must only be asserted when peripheral has valid data ready
     // in response to a read request. The AXI4LiteSlave state machine waits for
     // read_valid before capturing read_data and setting RVALID.
     //
@@ -171,10 +195,19 @@ class VGA extends Module {
     }.elsewhen(addr_ctrl) {
       read_data_prepared := ctrlReg
     }.elsewhen(addr_status) {
+      // STATUS register layout:
+      //   [31:16] timing_error_count - Lost-sync error counter (sys domain, CDC-safe)
+      //   [15:8]  reserved
+      //   [7:4]   curr_frame         - Current display frame index
+      //   [3]     reserved
+      //   [2]     upload_busy        - Framebuffer upload in progress
+      //   [1]     safe_to_swap       - Safe to swap frames (same as vblank)
+      //   [0]     in_vblank          - Currently in vertical blanking period
       read_data_prepared := Cat(
-        0.U(24.W),
+        timing_error_count,
+        0.U(8.W),
         status_curr_frame,
-        0.U(2.W),
+        0.U(1.W),
         status_upload_busy,
         status_safe_to_swap,
         status_in_vblank
@@ -252,6 +285,14 @@ class VGA extends Module {
       h_count := h_count + 1.U
     }
 
+    // First-frame guard: suppress undefined framebuffer data on power-up
+    // Use counter (starts at 0) instead of RegInit(true.B) to avoid CDC reset issues
+    val frame_count = RegInit(0.U(2.W))
+    val first_frame = frame_count === 0.U
+    when(h_count === (H_TOTAL - 1).U && v_count === (V_TOTAL - 1).U && frame_count < 2.U) {
+      frame_count := frame_count + 1.U
+    }
+
     val h_sync_pulse = (h_count >= (H_ACTIVE + H_FP).U) && (h_count < (H_ACTIVE + H_FP + H_SYNC).U)
     val v_sync_pulse = (v_count >= (V_ACTIVE + V_FP).U) && (v_count < (V_ACTIVE + V_FP + V_SYNC).U)
     val hsync_d1     = RegNext(!h_sync_pulse)
@@ -272,9 +313,10 @@ class VGA extends Module {
     val rel_x = Mux(x_px >= LEFT_MARGIN.U, x_px - LEFT_MARGIN.U, 0.U)
     val rel_y = Mux(y_px >= TOP_MARGIN.U, y_px - TOP_MARGIN.U, 0.U)
 
-    val frame_x_mult = rel_x * 10923.U
+    // Fixed-point division by SCALE_FACTOR using multiply-shift
+    val frame_x_mult = rel_x * DIV_BY_SCALE_MULT.U
     val frame_x_div  = frame_x_mult(23, 16)
-    val frame_y_mult = rel_y * 10923.U
+    val frame_y_mult = rel_y * DIV_BY_SCALE_MULT.U
     val frame_y_div  = frame_y_mult(23, 16)
     val frame_x      = Mux(frame_x_div >= FRAME_WIDTH.U, (FRAME_WIDTH - 1).U, frame_x_div(5, 0))
     val frame_y      = Mux(frame_y_div >= FRAME_HEIGHT.U, (FRAME_HEIGHT - 1).U, frame_y_div(5, 0))
@@ -344,7 +386,8 @@ class VGA extends Module {
       output_color := 0x01.U
     }
 
-    io.rrggbb      := Mux(h_active_d2 && v_active_d2, output_color, 0.U)
+    // Gate output during first frame to suppress undefined framebuffer data
+    io.rrggbb      := Mux(h_active_d2 && v_active_d2 && !first_frame, output_color, 0.U)
     io.activevideo := h_active_d2 && v_active_d2
 
     val x_px_d1 = RegNext(x_px)
@@ -354,7 +397,24 @@ class VGA extends Module {
 
     val in_vblank = v_count >= V_ACTIVE.U
 
-    wire_in_vblank  := in_vblank
-    wire_curr_frame := curr_frame
+    // Lost-sync detection: Track timing anomalies via toggle-based CDC
+    // Counter overflow detection - h_count and v_count should never exceed their bounds
+    // in normal operation. If they do, it indicates clock domain issues, configuration
+    // errors, or hardware faults.
+    //
+    // Toggle approach: Each error event toggles a flag, which is then CDC-synchronized
+    // to sys domain where the actual counting happens. This avoids torn multi-bit reads.
+    val timing_err_toggle = RegInit(false.B)
+    val h_overflow        = h_count >= H_TOTAL.U
+    val v_overflow        = v_count >= V_TOTAL.U
+    val timing_anomaly    = h_overflow || v_overflow
+
+    when(timing_anomaly) {
+      timing_err_toggle := !timing_err_toggle
+    }
+
+    wire_in_vblank       := in_vblank
+    wire_curr_frame      := curr_frame
+    wire_timing_err_flag := timing_err_toggle
   }
 }

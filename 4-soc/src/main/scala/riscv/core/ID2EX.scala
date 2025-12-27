@@ -8,6 +8,24 @@ import chisel3._
 import riscv.core.PipelineRegister
 import riscv.Parameters
 
+/**
+ * ID/EX Pipeline Register: Instruction Decode to Execute boundary.
+ *
+ * Buffers decoded instruction fields, register operands (with ID-stage forwarding
+ * already applied), immediate values, and all control signals needed for the
+ * Execute stage. This is the widest pipeline register due to the large number
+ * of decoded fields.
+ *
+ * Key signals buffered:
+ * - reg1_data, reg2_data: Register operands (already forwarded in ID stage)
+ * - immediate: Sign-extended immediate for I/S/B/U/J formats
+ * - regs_write_*: Destination register metadata for forwarding detection
+ * - memory_*_enable: Load/store indicators for hazard detection
+ * - csr_*: CSR instruction control signals
+ *
+ * Flush behavior: Inserts NOP bubble on data hazards (load-use, JAL/JALR)
+ *                 to allow forwarding paths to stabilize.
+ */
 class ID2EX extends Module {
   val io = IO(new Bundle {
     val stall                  = Input(Bool())

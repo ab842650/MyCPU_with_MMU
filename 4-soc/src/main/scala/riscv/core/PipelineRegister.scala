@@ -7,6 +7,19 @@ package riscv.core
 import chisel3._
 import riscv.Parameters
 
+/**
+ * Pipeline Register with stall and flush control
+ *
+ * Standard pipeline register for holding data between pipeline stages.
+ * Supports stalling (hold current value) and flushing (reset to default).
+ *
+ * Control signal priority (high to low):
+ *   1. flush - Reset to default (highest priority)
+ *   2. stall - Hold current value
+ *   3. normal - Capture input
+ *
+ * Timing: One-cycle delay from input to output (registered).
+ */
 class PipelineRegister(width: Int = Parameters.DataBits, defaultValue: UInt = 0.U) extends Module {
   val io = IO(new Bundle {
     val stall = Input(Bool())
@@ -14,19 +27,15 @@ class PipelineRegister(width: Int = Parameters.DataBits, defaultValue: UInt = 0.
     val in    = Input(UInt(width.W))
     val out   = Output(UInt(width.W))
   })
-  val myreg = RegInit(UInt(width.W), defaultValue)
-  val out   = RegInit(UInt(width.W), defaultValue)
+
+  val reg = RegInit(UInt(width.W), defaultValue)
+
   when(io.flush) {
-    out   := defaultValue
-    myreg := defaultValue
+    reg := defaultValue
+  }.elsewhen(!io.stall) {
+    reg := io.in
   }
-    .elsewhen(io.stall) {
-      out := myreg
-    }
-    .otherwise {
-      myreg := io.in
-      out   := io.in
-    }
-  io.out := out // 在最后一步才给io.out赋值，是为了防止出现组合逻辑环路导致sbt "testOnly riscv.ThreeStageCPUTest"无法通过（sbt "testOnly riscv.PipelineRegisterTest"可以通过）
-  // 踩了很多次坑猜测出来的，可能是因为如果在前面的条件判断中就给io.out赋值，硬件就不会理会后面代码对io.out的再次赋值
+  // When stalled: reg retains its value (no assignment needed)
+
+  io.out := reg
 }

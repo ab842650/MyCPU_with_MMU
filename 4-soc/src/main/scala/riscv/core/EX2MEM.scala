@@ -8,6 +8,23 @@ import chisel3._
 import riscv.core.PipelineRegister
 import riscv.Parameters
 
+/**
+ * EX/MEM Pipeline Register: Execute to Memory Access boundary.
+ *
+ * Buffers ALU computation results, store data, and memory control signals.
+ * This register feeds the memory access stage and provides the MEM-stage
+ * forwarding path (highest priority in the forwarding network).
+ *
+ * Key signals buffered:
+ * - alu_result: Address for loads/stores, or computation result for ALU ops
+ * - reg2_data: Store data (forwarded from EX stage)
+ * - funct3: Memory access width (byte/half/word) and sign-extension mode
+ * - memory_*_enable: Triggers AXI4-Lite bus transactions in MEM stage
+ *
+ * No flush input: EX2MEM never flushes because by the time an instruction
+ * reaches this point, all control hazards have been resolved. Memory stalls
+ * simply hold the register contents.
+ */
 class EX2MEM extends Module {
   val io = IO(new Bundle() {
     val stall               = Input(Bool())

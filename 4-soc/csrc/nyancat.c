@@ -5,6 +5,8 @@
 
 #include <stdint.h>
 
+#include "mmio.h"
+
 // Enable prepacked frames to guarantee correct pixels in SDL demo
 #define USE_PREPACKED_FRAMES 1
 
@@ -12,29 +14,21 @@
 #include "nyancat-frames.h"
 #endif
 
+#if !USE_PREPACKED_FRAMES
 // Custom memory copy for bare-metal environment (no libc)
+// Only needed for delta decompression when not using prepacked frames
 static inline void copy_buffer(uint8_t *dest, const uint8_t *src, int n)
 {
     for (int i = 0; i < n; i++)
         dest[i] = src[i];
 }
+#endif
 
-// VGA MMIO register addresses (base: 0x20000000 for 4-soc)
-// In 4-soc, BusSwitch maps device 1 (VGA) to 0x20000000-0x3FFFFFFF
-#define VGA_BASE 0x20000000u
-#define VGA_ID (VGA_BASE + 0x00)
-#define VGA_STATUS (VGA_BASE + 0x04)
-#define VGA_INTR_STATUS (VGA_BASE + 0x08)
-#define VGA_UPLOAD_ADDR (VGA_BASE + 0x10)
-#define VGA_STREAM_DATA (VGA_BASE + 0x14)
-#define VGA_CTRL (VGA_BASE + 0x20)
-#define VGA_PALETTE(n) (VGA_BASE + 0x24 + ((n) << 2))
-
-// Animation constants
-#define FRAME_SIZE 4096    // 64×64 pixels
-#define FRAME_COUNT 12     // Total animation frames
-#define PIXELS_PER_WORD 8  // 8 4-bit pixels per 32-bit word
-#define WORDS_PER_FRAME (FRAME_SIZE / PIXELS_PER_WORD)
+// Animation constants (use VGA constants from mmio.h where applicable)
+#define FRAME_SIZE VGA_FRAME_SIZE
+#define FRAME_COUNT VGA_NUM_FRAMES
+#define PIXELS_PER_WORD VGA_PIXELS_PER_WORD
+#define WORDS_PER_FRAME VGA_WORDS_PER_FRAME
 #define PALETTE_SIZE 14  // Nyancat color count
 #define PALETTE_MAX 16   // VGA palette entries
 
@@ -73,46 +67,27 @@ static const uint8_t nyancat_palette[14] = {
 // Include compressed frame data (delta-RLE)
 #include "nyancat-data.h"
 
-// MMIO access functions
-static inline void vga_write32(uint32_t addr, uint32_t val)
-{
-    *(volatile uint32_t *) addr = val;
-}
-
-static inline uint32_t vga_read32(uint32_t addr)
-{
-    return *(volatile uint32_t *) addr;
-}
-
-// Pack 8 4-bit pixels into a 32-bit word
-static inline uint32_t pack8_pixels(const uint8_t *pixels)
-{
-    return (uint32_t) (pixels[0] & 0xF) | ((uint32_t) (pixels[1] & 0xF) << 4) |
-           ((uint32_t) (pixels[2] & 0xF) << 8) |
-           ((uint32_t) (pixels[3] & 0xF) << 12) |
-           ((uint32_t) (pixels[4] & 0xF) << 16) |
-           ((uint32_t) (pixels[5] & 0xF) << 20) |
-           ((uint32_t) (pixels[6] & 0xF) << 24) |
-           ((uint32_t) (pixels[7] & 0xF) << 28);
-}
-
 // Initialize VGA palette with nyancat colors
 void vga_init_palette(void)
 {
     for (int i = 0; i < PALETTE_SIZE; i++) {
-        vga_write32(VGA_PALETTE(i), nyancat_palette[i] & 0x3F);
+        vga_write32(VGA_ADDR_PALETTE(i), nyancat_palette[i] & 0x3F);
     }
     // Fill remaining palette entries with black
     for (int i = PALETTE_SIZE; i < PALETTE_MAX; i++) {
-        vga_write32(VGA_PALETTE(i), 0x00);
+        vga_write32(VGA_ADDR_PALETTE(i), 0x00);
     }
 }
 
-// Frame buffers for delta decompression
+#if !USE_PREPACKED_FRAMES
+// Frame buffers for delta decompression (8KB total)
+// Only needed when runtime decompression is used
 static uint8_t frame_buffer[FRAME_SIZE];       // Current frame buffer
 static uint8_t prev_frame_buffer[FRAME_SIZE];  // Previous frame for delta
+#endif
 
-// Upload compressed data size (defined in header)
+// Compressed nyancat frames from nyancat-frames.h; offsets index into this
+// array
 extern const uint8_t nyancat_compressed_data[];
 
 #if NYANCAT_COMPRESSION_DELTA
@@ -124,16 +99,18 @@ extern const uint8_t nyancat_compressed_data[];
 //                      0x5Y=Skip*64(64-1024)
 void vga_upload_frame_delta(int frame_index)
 {
-#if USE_PREPACKED_FRAMES
-    // Directly upload prepacked words for this frame
-    vga_write32(VGA_UPLOAD_ADDR, ((uint32_t) (frame_index & 0xF) << 16) | 0);
-    for (int i = 0; i < WORDS_PER_FRAME; i++) {
-        vga_write32(VGA_STREAM_DATA, nyancat_frames[frame_index][i]);
-    }
-    return;
-#endif
     // Set upload address to start of frame
-    vga_write32(VGA_UPLOAD_ADDR, ((uint32_t) (frame_index & 0xF) << 16) | 0);
+    vga_write32(VGA_ADDR_UPLOAD_ADDR,
+                ((uint32_t) (frame_index & 0xF) << 16) | 0);
+
+#if USE_PREPACKED_FRAMES
+    // Directly upload prepacked words for this frame (saves 8KB .bss)
+    for (int i = 0; i < WORDS_PER_FRAME; i++) {
+        vga_write32(VGA_ADDR_STREAM_DATA, nyancat_frames[frame_index][i]);
+    }
+#else
+    // Runtime delta-RLE decompression (requires frame_buffer and
+    // prev_frame_buffer)
 
     // Get compressed data for this frame with bounds
     uint16_t offset = nyancat_frame_offsets[frame_index];
@@ -151,10 +128,9 @@ void vga_upload_frame_delta(int frame_index)
 
         while (output_index < FRAME_SIZE && p < data_end) {
             uint8_t opcode = *p++;
-
-            if (opcode == END_OF_FRAME) {
+            if (opcode == END_OF_FRAME)
                 break;  // End of frame
-            }
+
             if ((opcode & OPCODE_MASK) == OP_SET_COLOR) {
                 current_color = opcode & PARAM_MASK;  // SetColor
             } else if ((opcode & OPCODE_MASK) == OP_REPEAT_1) {
@@ -184,10 +160,9 @@ void vga_upload_frame_delta(int frame_index)
 
         while (pos < FRAME_SIZE && p < data_end) {
             uint8_t opcode = *p++;
-
-            if (opcode == END_OF_FRAME) {
+            if (opcode == END_OF_FRAME)
                 break;  // End of frame
-            }
+
             if ((opcode & OPCODE_MASK) == OP_SET_COLOR) {
                 current_color = opcode & PARAM_MASK;  // SetColor
             } else if ((opcode & OPCODE_MASK) == OP_SKIP_1) {
@@ -219,9 +194,10 @@ void vga_upload_frame_delta(int frame_index)
 
     // Upload decompressed frame to VGA (512 words = 4096 pixels / 8)
     for (int i = 0; i < FRAME_SIZE; i += PIXELS_PER_WORD) {
-        uint32_t packed = pack8_pixels(&frame_buffer[i]);
-        vga_write32(VGA_STREAM_DATA, packed);
+        uint32_t packed = vga_pack8_pixels(&frame_buffer[i]);
+        vga_write32(VGA_ADDR_STREAM_DATA, packed);
     }
+#endif
 }
 
 #else
@@ -230,7 +206,8 @@ void vga_upload_frame_delta(int frame_index)
 void vga_upload_frame_rle(int frame_index)
 {
     // Set upload address to start of frame
-    vga_write32(VGA_UPLOAD_ADDR, ((uint32_t) (frame_index & 0xF) << 16) | 0);
+    vga_write32(VGA_ADDR_UPLOAD_ADDR,
+                ((uint32_t) (frame_index & 0xF) << 16) | 0);
 
     // Get compressed data for this frame with bounds
     uint16_t offset = nyancat_frame_offsets[frame_index];
@@ -247,10 +224,9 @@ void vga_upload_frame_rle(int frame_index)
 
     while (output_index < FRAME_SIZE && p < data_end) {
         uint8_t opcode = *p++;
-
-        if (opcode == END_OF_FRAME) {
+        if (opcode == END_OF_FRAME)
             break;  // End of frame
-        }
+
         if ((opcode & OPCODE_MASK) == OP_SET_COLOR) {
             current_color = opcode & PARAM_MASK;  // SetColor
         } else if ((opcode & OPCODE_MASK) == OP_REPEAT_1) {
@@ -270,8 +246,8 @@ void vga_upload_frame_rle(int frame_index)
 
     // Upload decompressed frame to VGA
     for (int i = 0; i < FRAME_SIZE; i += PIXELS_PER_WORD) {
-        uint32_t packed = pack8_pixels(&frame_buffer[i]);
-        vga_write32(VGA_STREAM_DATA, packed);
+        uint32_t packed = vga_pack8_pixels(&frame_buffer[i]);
+        vga_write32(VGA_ADDR_STREAM_DATA, packed);
     }
 }
 
@@ -288,35 +264,33 @@ static inline void delay(uint32_t cycles)
 int main(void)
 {
     // Verify VGA peripheral presence
-    uint32_t id = vga_read32(VGA_ID);
-    if (id != 0x56474131)
+    uint32_t id = vga_read32(VGA_ADDR_ID);
+    if (id != VGA_EXPECTED_ID)
         return 1;
 
     // Initialize palette and enable display
     vga_init_palette();
-    vga_write32(VGA_CTRL, 0x01);
+    vga_write32(VGA_ADDR_CTRL, 0x01);
 
 #if NYANCAT_COMPRESSION_DELTA
     // Upload all frames (delta decompression) while keeping frame 0 displayed
-    for (int frame = 0; frame < FRAME_COUNT; frame++) {
+    for (int frame = 0; frame < FRAME_COUNT; frame++)
         vga_upload_frame_delta(frame);
-    }
 
     // Animate: cycle through frames infinitely
     for (uint32_t frame = 0;;) {
-        vga_write32(VGA_CTRL, (frame << 4) | 0x01);
+        vga_write32(VGA_ADDR_CTRL, (frame << 4) | 0x01);
         delay(50000);
         frame = (frame + 1 < FRAME_COUNT) ? frame + 1 : 0;
     }
 #else
     // Upload all frames (baseline RLE) while keeping frame 0 displayed
-    for (int frame = 0; frame < FRAME_COUNT; frame++) {
+    for (int frame = 0; frame < FRAME_COUNT; frame++)
         vga_upload_frame_rle(frame);
-    }
 
     // Animate: cycle through frames infinitely
     for (uint32_t frame = 0;;) {
-        vga_write32(VGA_CTRL, (frame << 4) | 0x01);
+        vga_write32(VGA_ADDR_CTRL, (frame << 4) | 0x01);
         delay(50000);
         frame = (frame + 1 < FRAME_COUNT) ? frame + 1 : 0;
     }

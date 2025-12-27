@@ -3,7 +3,7 @@
 # "LICENSE" for information on usage and redistribution of this file.
 
 # Include common build utilities
-include build.mk
+include ../common/build.mk
 
 test:
 	cd .. && sbt "project soc" test
@@ -23,16 +23,59 @@ verilator:
 		-LDFLAGS "$$(sdl2-config --libs)" && \
 		make -C obj_dir -f VTop.mk
 
-demo: verilator
-	@echo "🔄 Building nyancat demo binary..."
+sim: verilator
+	@if [ -z "$(BINARY)" ]; then \
+		echo "Usage: make sim BINARY=<path/to/file.asmbin>"; \
+		echo "Example: make sim BINARY=csrc/nyancat.asmbin"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(BINARY)" ]; then \
+		echo "Error: Binary file not found: $(BINARY)"; \
+		exit 1; \
+	fi
+	@echo "🎮 Running simulation with $(BINARY)..."
+	cd verilog/verilator/obj_dir && ./VTop -i ../../../$(BINARY)
+
+check-vga: verilator
+	@echo "🔄 Building nyancat binary..."
 	@$(MAKE) -C csrc nyancat.asmbin >/dev/null
-	@echo "🎮 Running nyancat demo with SDL2 display..."
+	@echo "🖥️  Running VGA test (nyancat)..."
 	@echo "   - Press ESC or close window to exit"
 	@echo "   - VGA output: 640×480 @ 72Hz"
 	@echo ""
 	cd verilog/verilator/obj_dir && ./VTop -i ../../../csrc/nyancat.asmbin
 	@echo ""
-	@echo "✅ Demo complete!"
+	@echo "✅ VGA test complete!"
+
+shell: verilator
+	@echo "🔄 Building MyCPU shell binary..."
+	@$(MAKE) -C csrc shell.asmbin >/dev/null
+	@echo "🐚 Starting MyCPU interactive shell..."
+	@echo "   - Type 'help' for available commands"
+	@echo "   - Line editing: arrows, Home/End, Ctrl-A/E/U/K/W"
+	@echo "   - Press Ctrl-C to exit"
+	@echo ""
+	cd verilog/verilator/obj_dir && ./VTop -i ../../../csrc/shell.asmbin --terminal --headless
+
+# UART tests: loopback self-test + interactive echo test
+check-uart: verilator
+	@echo "🔄 Building UART binaries..."
+	@$(MAKE) -C csrc uart.asmbin shell.asmbin >/dev/null
+	@echo ""
+	@echo "📡 [1/2] Running UART loopback test..."
+	cd verilog/verilator/obj_dir && ./VTop -i ../../../csrc/uart.asmbin
+	@echo ""
+	@echo "📡 [2/2] Running UART echo test (may take ~30 seconds)..."
+	@cd verilog/verilator/obj_dir && \
+		printf "Test\r" | timeout 30 ./VTop -i ../../../csrc/shell.asmbin --terminal --headless 2>&1 | \
+		tee /tmp/uart_test_output.txt | tail -5
+	@echo ""
+	@if grep -q "Test" /tmp/uart_test_output.txt; then \
+		echo "✅ UART tests PASSED"; \
+	else \
+		echo "❌ UART echo test FAILED - 'Test' was not found in output"; \
+		exit 1; \
+	fi
 
 indent:
 	find . -name '*.scala' | xargs scalafmt
@@ -55,6 +98,7 @@ compliance: check-riscof
 
 clean:
 	cd .. && sbt "project soc" clean
+	$(MAKE) -C csrc clean
 	$(RM) -r test_run_dir
 	$(RM) -r verilog/verilator/obj_dir
 	$(RM) verilog/verilator/*.v
@@ -64,4 +108,4 @@ clean:
 distclean: clean
 	$(RM) -r results
 
-.PHONY: verilator test indent demo compliance clean distclean
+.PHONY: verilator test indent sim check-vga check-uart shell compliance clean distclean

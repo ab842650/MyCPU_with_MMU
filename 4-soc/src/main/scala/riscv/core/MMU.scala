@@ -51,7 +51,4 @@ class MMU extends Module {
   when(io.enable && io.d_valid) {
     printf(p"[D-MMU] VA=0x${Hexadecimal(io.d_va)} PA=0x${Hexadecimal(io.d_pa)}\n")
   }
-  when(!io.enable){
-    printf(p"[I-MMU] VA=0x${Hexadecimal(io.i_va)} PA=0x${Hexadecimal(io.i_pa)}\n")
-  }
 }

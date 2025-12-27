@@ -2,6 +2,11 @@
 // MyCPU is freely redistributable under the MIT License. See the file
 // "LICENSE" for information on usage and redistribution of this file.
 
+#ifndef MMIO_H
+#define MMIO_H
+
+#include <stdint.h>
+
 /**
  * Memory-Mapped I/O Register Definitions
  *
@@ -20,38 +25,74 @@
  *   +0x14: VGA_STREAM_DATA - 8 pixels packed in 32-bit word (auto-increment)
  *   +0x20: VGA_CTRL        - Display enable, blank, swap request, frame select
  *   +0x24-0x60: VGA_PALETTE[0-15] - 6-bit VGA colors (RRGGBB)
+ *
+ * Two access patterns are supported:
+ *   1. Pointer-based (direct dereference): *VGA_CTRL = 0x01;
+ *   2. Address-based (function access): vga_write32(VGA_ADDR_CTRL, 0x01);
  */
-#define VGA_BASE 0x20000000
-#define VGA_ID                             \
-    ((volatile unsigned int *) (VGA_BASE + \
-                                0x00)) /* +0x00: Peripheral ID (RO) */
-#define VGA_STATUS \
-    ((volatile unsigned int *) (VGA_BASE + 0x04)) /* +0x04: Status (RO) */
-#define VGA_INTR_STATUS \
-    ((volatile unsigned int *) (VGA_BASE + 0x08)) /* +0x08: Interrupt (W1C) */
-#define VGA_UPLOAD_ADDR                                                       \
-    ((volatile unsigned int *) (VGA_BASE + 0x10)) /* +0x10: Upload addr (R/W) \
-                                                   */
-#define VGA_STREAM_DATA \
-    ((volatile unsigned int *) (VGA_BASE + 0x14)) /* +0x14: Stream data (W) */
-#define VGA_CTRL \
-    ((volatile unsigned int *) (VGA_BASE + 0x20)) /* +0x20: Control (R/W) */
-#define VGA_PALETTE_BASE (VGA_BASE + 0x24)
-#define VGA_PALETTE(n) \
-    ((volatile unsigned int *) (VGA_PALETTE_BASE + ((n) * 4)))
+#define VGA_BASE 0x20000000u
 
-/* Legacy alias for backward compatibility */
-#define VRAM_BASE VGA_BASE
-#define VRAM ((volatile unsigned char *) VRAM_BASE)
+/* Address-only macros for function-based access (vga_write32/vga_read32) */
+#define VGA_ADDR_ID (VGA_BASE + 0x00)
+#define VGA_ADDR_STATUS (VGA_BASE + 0x04)
+#define VGA_ADDR_INTR_STATUS (VGA_BASE + 0x08)
+#define VGA_ADDR_UPLOAD_ADDR (VGA_BASE + 0x10)
+#define VGA_ADDR_STREAM_DATA (VGA_BASE + 0x14)
+#define VGA_ADDR_CTRL (VGA_BASE + 0x20)
+#define VGA_ADDR_PALETTE(n) (VGA_BASE + 0x24 + ((n) << 2))
+
+/* Pointer macros for direct dereference access */
+#define VGA_ID ((volatile uint32_t *) (VGA_BASE + 0x00))          /* RO */
+#define VGA_STATUS ((volatile uint32_t *) (VGA_BASE + 0x04))      /* RO */
+#define VGA_INTR_STATUS ((volatile uint32_t *) (VGA_BASE + 0x08)) /* W1C */
+#define VGA_UPLOAD_ADDR ((volatile uint32_t *) (VGA_BASE + 0x10)) /* R/W */
+#define VGA_STREAM_DATA ((volatile uint32_t *) (VGA_BASE + 0x14)) /* WO */
+#define VGA_CTRL ((volatile uint32_t *) (VGA_BASE + 0x20))        /* R/W */
+#define VGA_PALETTE_BASE (VGA_BASE + 0x24)
+#define VGA_PALETTE(n) ((volatile uint32_t *) (VGA_PALETTE_BASE + ((n) << 2)))
+
+/* VGA framebuffer constants */
+#define VGA_FRAME_WIDTH 64
+#define VGA_FRAME_HEIGHT 64
+#define VGA_FRAME_SIZE (VGA_FRAME_WIDTH * VGA_FRAME_HEIGHT)
+#define VGA_PIXELS_PER_WORD 8
+#define VGA_WORDS_PER_FRAME (VGA_FRAME_SIZE / VGA_PIXELS_PER_WORD)
+#define VGA_NUM_FRAMES 12
+#define VGA_EXPECTED_ID 0x56474131u /* 'VGA1' */
+
+/* VGA MMIO access helper functions */
+static inline void vga_write32(uint32_t addr, uint32_t val)
+{
+    *(volatile uint32_t *) addr = val;
+    __asm__ volatile("" ::
+                         : "memory"); /* Compiler barrier: prevent reordering */
+}
+
+static inline uint32_t vga_read32(uint32_t addr)
+{
+    uint32_t val = *(volatile uint32_t *) addr;
+    __asm__ volatile("" ::
+                         : "memory"); /* Compiler barrier: prevent reordering */
+    return val;
+}
+
+/* Pack 8 4-bit pixels into a 32-bit word for VGA framebuffer upload */
+static inline uint32_t vga_pack8_pixels(const uint8_t *pixels)
+{
+    return (uint32_t) (pixels[0] & 0xF) | ((uint32_t) (pixels[1] & 0xF) << 4) |
+           ((uint32_t) (pixels[2] & 0xF) << 8) |
+           ((uint32_t) (pixels[3] & 0xF) << 12) |
+           ((uint32_t) (pixels[4] & 0xF) << 16) |
+           ((uint32_t) (pixels[5] & 0xF) << 20) |
+           ((uint32_t) (pixels[6] & 0xF) << 24) |
+           ((uint32_t) (pixels[7] & 0xF) << 28);
+}
+
 
 /* Timer peripheral registers (base: 0x80000000) */
-#define TIMER_BASE 0x80000000
-#define TIMER_LIMIT                          \
-    ((volatile unsigned int *) (TIMER_BASE + \
-                                4)) /* +0x04: Timer limit register */
-#define TIMER_ENABLED                        \
-    ((volatile unsigned int *) (TIMER_BASE + \
-                                8)) /* +0x08: Timer enable register */
+#define TIMER_BASE 0x80000000u
+#define TIMER_LIMIT ((volatile uint32_t *) (TIMER_BASE + 0x04))   /* R/W */
+#define TIMER_ENABLED ((volatile uint32_t *) (TIMER_BASE + 0x08)) /* R/W */
 
 /**
  * UART peripheral registers (base: 0x40000000)
@@ -59,126 +100,88 @@
  * Hardware Architecture:
  *   The UART uses ready/valid handshaking internally (Chisel DecoupledIO)
  *   with BufferedTx (single-byte buffer) for transmission and Rx with
- *   interrupt signaling for reception. Status registers are NOT exposed
- *   to software via MMIO, requiring careful driver design.
+ *   interrupt signaling for reception.
  *
  * Register Map:
- *   +0x00: Reserved
- *   +0x04: UART_BAUDRATE - Baud rate configuration (read/write)
- *   +0x08: UART_ENABLE   - Enable control and interrupt clear (write)
- *   +0x0C: UART_RECV     - Receive data register (read, clears RX interrupt)
- *   +0x10: UART_SEND     - Transmit data register (write)
+ *   +0x00: UART_STATUS    - Status register (read-only)
+ *                           bit 0: TX ready (buffer can accept data)
+ *                           bit 1: RX valid (received data available)
+ *   +0x04: UART_BAUDRATE  - Configured baud rate (read-only, compile-time)
+ *   +0x08: UART_INTERRUPT - Interrupt enable (write: non-zero enables)
+ *   +0x0C: UART_RECV      - Receive data register (read clears interrupt)
+ *   +0x10: UART_SEND      - Transmit data register (write-only)
  *
- * TX Hardware Behavior and Limitations:
+ * TX Operation:
  *   - Architecture: CPU → Buffer (1 byte) → Tx (shift register) → txd pin
- *   - Buffer state: empty (ready) or full (busy)
- *   - CRITICAL LIMITATION: No TX ready status exposed to software
- *   - Write behavior: Writes to UART_SEND when buffer is full are DROPPED
- *   - Hardware does not stall writes or queue beyond single buffer
+ *   - Poll UART_STATUS bit 0 before writing to ensure buffer ready
+ *   - Writes when buffer full are silently dropped
  *
- *   Software must use one of these strategies:
- *     1. Conservative pacing: Add inter-character delays (see UART_TX_DELAY)
- *     2. Slow baud rates: Ensure buffer drains faster than writes arrive
- *     3. Short messages: Verify total message fits within buffer drain time
- *     4. Hardware modification: Expose tx.io.channel.ready as status bit
+ * RX Operation:
+ *   - Architecture: rxd pin → Rx (shift register) → rxData register
+ *   - Poll UART_STATUS bit 1 to check for valid data
+ *   - Reading UART_RECV clears the RX interrupt flag
+ *   - Can reliably receive all byte values 0x00-0xFF using STATUS polling
  *
- *   For test environments (fast simulation, 8-byte messages), no delay needed.
- *   For production (slow baud, long messages), use UART_TX_DELAY or modify HW.
+ * Limitations:
+ *   - Baud rate is fixed at compile time (read-only via UART_BAUDRATE)
+ *   - Single-byte TX buffer: poll STATUS before each write
+ *   - Single-byte RX buffer: read promptly to avoid overrun
  *
- * RX Hardware Behavior and Limitations:
- *   - Architecture: rxd pin → Rx (shift register) → rxData register → interrupt
- *   - Interrupt flag set when data received, cleared when UART_RECV read
- *   - CRITICAL LIMITATION: No RX data valid flag exposed to software
- *   - Read behavior: Returns last received byte, or 0 if no data received yet
+ * Usage Pattern:
+ *   // TX: Wait for ready, then send
+ *   while (!(*UART_STATUS & 0x01)) ;  // Wait for TX ready
+ *   *UART_SEND = byte;
  *
- *   This creates an ambiguity problem:
- *     - Reading UART_RECV with no data: returns 0
- *     - Reading UART_RECV after receiving 0x00: returns 0
- *     - After first read, hardware clears valid flag, subsequent reads return 0
- *     - Software cannot distinguish "no data" from "valid 0x00 byte"
- *
- *   Polling mode (uart_getc):
- *     - Treats non-zero as valid data, times out on zero
- *     - CANNOT reliably receive 0x00 bytes
- *     - Suitable ONLY for ASCII text transmission (0x01-0xFF)
- *
- *   Interrupt mode (uart_rx_interrupt_handler + uart_getc_nonblocking):
- *     - ISR reads hardware immediately when interrupt fires
- *     - Software buffer stores byte (including 0x00) with separate valid flag
- *     - CAN reliably receive all byte values 0x00-0xFF
- *     - Recommended for binary data transmission
- *
- *   Hardware modification for reliable polling:
- *     Option A: Return valid bit in bit 31, data in bits [7:0]
- *     Option B: Make read block until data valid (requires bus stall support)
- *
- * Read Side Effects:
- *   - UART_RECV: Clears RX interrupt flag on read
- *   - UART_BAUDRATE: No side effects
- *   - Reading when no data available: Returns 0, no interrupt cleared
- *
- * Error Handling Strategy:
- *   - Initialize with uart_init() before any operations
- *   - Check return codes from all UART functions
- *   - Use uart_is_initialized() to verify initialization state
- *   - For ASCII text: Use polling mode (uart_getc)
- *   - For binary data: Use interrupt mode (uart_rx_interrupt_handler)
- *   - For production TX: Configure UART_TX_DELAY or use slow baud rates
- *
- * Recommended Hardware Improvements:
- *   1. Expose tx.io.channel.ready as UART_STATUS bit 0 (TX ready)
- *   2. Expose rx.io.channel.valid as UART_STATUS bit 1 (RX valid)
- *   3. Add UART_STATUS register at offset +0x00
- *   4. Make UART_RECV return 0x100 | data when valid, 0x000 when not
- *   5. Make MMIO bus stall writes when TX buffer full
+ *   // RX: Wait for valid, then read
+ *   while (!(*UART_STATUS & 0x02)) ;  // Wait for RX valid
+ *   byte = *UART_RECV;
  */
-#define UART_BASE 0x40000000
-#define UART_BAUDRATE \
-    ((volatile unsigned int *) (UART_BASE + 4)) /* +0x04: Baud rate (R/W) */
-#define UART_ENABLE                         \
-    ((volatile unsigned int *) (UART_BASE + \
-                                8)) /* +0x08: Enable/IRQ clear (W) */
-#define UART_RECV \
-    ((volatile unsigned int *) (UART_BASE + 12)) /* +0x0C: RX data (R) */
-#define UART_SEND \
-    ((volatile unsigned int *) (UART_BASE + 16)) /* +0x10: TX data (W) */
+#define UART_BASE 0x40000000u
+#define UART_STATUS ((volatile uint32_t *) (UART_BASE + 0x00))    /* RO */
+#define UART_BAUDRATE ((volatile uint32_t *) (UART_BASE + 0x04))  /* RO */
+#define UART_INTERRUPT ((volatile uint32_t *) (UART_BASE + 0x08)) /* WO */
+#define UART_RECV ((volatile uint32_t *) (UART_BASE + 0x0C))      /* RO */
+#define UART_SEND ((volatile uint32_t *) (UART_BASE + 0x10))      /* WO */
+
+/* Legacy alias for backward compatibility */
+#define UART_ENABLE UART_INTERRUPT
 
 /**
  * UART Usage Examples
  *
- * Example 1: Simple TX (test environment, short ASCII messages)
+ * Example 1: Reliable TX with STATUS polling
  *
  *   *UART_BAUDRATE = 115200;
  *   *UART_ENABLE = 1;
- *   *UART_SEND = 'H';
- *   *UART_SEND = 'i';
- *   *UART_SEND = '\n';
- *
- * Example 2: RX polling mode (ASCII only, cannot receive 0x00)
- *
- *   *UART_BAUDRATE = 115200;
- *   *UART_ENABLE = 1;
- *   unsigned int data;
- *   for (int i = 0; i < 1000; i++) {
- *     data = *UART_RECV;
- *     if (data != 0) {
- *       char c = (char)(data & 0xFF);
- *       // Process received character
- *       break;
- *     }
+ *   const char *msg = "Hello\n";
+ *   while (*msg) {
+ *     while (!(*UART_STATUS & 0x01)) ;  // Wait for TX ready
+ *     *UART_SEND = *msg++;
  *   }
+ *
+ * Example 2: Reliable RX with STATUS polling (handles all bytes 0x00-0xFF)
+ *
+ *   *UART_BAUDRATE = 115200;
+ *   *UART_ENABLE = 1;
+ *   while (!(*UART_STATUS & 0x02)) ;  // Wait for RX valid
+ *   unsigned char byte = (unsigned char) (*UART_RECV & 0xFF);
  *
  * Example 3: Echo server (loopback test)
  *
  *   *UART_BAUDRATE = 115200;
  *   *UART_ENABLE = 1;
- *   *UART_SEND = 'X';  // Send test character
- *   for (volatile int i = 0; i < 20; i++) ;  // Small delay
- *   unsigned int received = *UART_RECV;  // Read back (loopback)
+ *   while (!(*UART_STATUS & 0x01)) ;  // Wait for TX ready
+ *   *UART_SEND = 'X';
+ *   while (!(*UART_STATUS & 0x02)) ;  // Wait for RX valid
+ *   unsigned int received = *UART_RECV;
  *   if ((received & 0xFF) == 'X') {
  *     // Loopback successful
  *   }
- *
- * For comprehensive RX implementations (polling + interrupt-driven),
- * see uart_rx.c reference implementation in csrc/ directory.
  */
+
+/* Test harness registers (simulation only) */
+/* Cast via uintptr_t to suppress -Warray-bounds warning at -O2 */
+#define TEST_DONE_FLAG ((volatile uint32_t *) (uintptr_t) 0x100)
+#define TEST_RESULT ((volatile uint32_t *) (uintptr_t) 0x104)
+
+#endif /* MMIO_H */

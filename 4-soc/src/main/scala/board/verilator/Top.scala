@@ -47,14 +47,14 @@ class Top extends Module {
     val cpu_csr_debug_read_data    = Output(UInt(Parameters.DataWidth))
   })
 
-  // Memory controlled in C++ code
+  // AXI4-Lite memory model provided by Verilator C++ harness (sim.cpp)
   val mem_slave = Module(new AXI4LiteSlave(Parameters.AddrBits, Parameters.DataBits))
   io.mem_slave <> mem_slave.io.bundle
 
   // VGA peripheral
   val vga = Module(new VGA)
 
-  // UART peripheral (115200 baud at 50MHz system clock)
+  // UART peripheral (115200 baud standard rate)
   val uart = Module(new Uart(frequency = 50000000, baudRate = 115200))
 
   val cpu         = Module(new CPU)

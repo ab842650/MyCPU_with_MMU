@@ -25,17 +25,17 @@ class CPUBundle extends Bundle {
   // Interrupt
   val interrupt_flag = Input(UInt(Parameters.InterruptFlagWidth))
 
+  //mmu
+  val satp_out = Output(UInt(Parameters.DataWidth))
+
   // Debug interfaces
   val debug_read_address = Input(UInt(Parameters.PhysicalRegisterAddrWidth))
   val debug_read_data    = Output(UInt(Parameters.DataWidth))
 
   val csr_debug_read_address = Input(UInt(Parameters.CSRRegisterAddrWidth))
   val csr_debug_read_data    = Output(UInt(Parameters.DataWidth))
-  
-  //mmu
-  val satp_out = Output(UInt(Parameters.DataWidth))
 
-  // Intercepts CPU memory access for bus routing
+  // Bus address and write strobes for BusSwitch/arbiter AXI4-Lite routing
   val bus_address            = Output(UInt(Parameters.AddrWidth))
   val debug_bus_write_enable = Output(Bool())
   val debug_bus_write_data   = Output(UInt(Parameters.DataWidth))

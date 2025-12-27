@@ -1,7 +1,9 @@
-CROSS_COMPILE ?= /Users/guxiaozheng/riscv-none-elf-gcc/bin/riscv-none-elf-
+CROSS_COMPILE=$(HOME)/riscv-none-elf-gcc/bin/riscv-none-elf-
 
 ASFLAGS = -march=rv32i_zicsr -mabi=ilp32
-CFLAGS = -O0 -Wall -march=rv32i_zicsr -mabi=ilp32
+# Optimization required: -O2 produces large stack frames that overflow in deep call chains
+# RV32I lacks hardware multiply/divide, so -O2 significantly reduces code size
+CFLAGS = -O2 -Wall -fno-builtin -march=rv32i_zicsr -mabi=ilp32
 LDFLAGS = --oformat=elf32-littleriscv
 
 AS := $(CROSS_COMPILE)as
@@ -9,30 +11,32 @@ CC := $(CROSS_COMPILE)gcc
 LD := $(CROSS_COMPILE)ld
 OBJCOPY := $(CROSS_COMPILE)objcopy
 
+# Program targets (add new programs here)
+PROGRAMS := nyancat uart shell
+BINARIES := $(PROGRAMS:%=%.asmbin)
+
 %.asmbin: %.elf
 	$(OBJCOPY) -O binary -j .text -j .data $< $@
 
-# Clear the .DEFAULT_GOAL special variable
-.DEFAULT_GOAL :=
+.DEFAULT_GOAL := all
 
-all: nyancat.asmbin uart.asmbin mmutest.asmbin
+all: $(BINARIES)
 
 # All programs use proper init.S with ABI compliance and .bss clearing
-nyancat.asmbin: nyancat.c nyancat-data.h init.o
+nyancat.asmbin: nyancat.c nyancat-data.h init.o link.lds
 	$(CC) $(CFLAGS) -DNYANCAT_COMPRESSION_DELTA=$(NYANCAT_COMPRESSION_DELTA) -c -o nyancat.o nyancat.c
 	$(CROSS_COMPILE)ld -o nyancat.elf -T link.lds $(LDFLAGS) nyancat.o init.o
 	$(OBJCOPY) -O binary -j .text -j .data nyancat.elf $@
 
-mmutest.asmbin: mmutest.c init.o
-	$(CC) $(CFLAGS)  -c -o mmutest.o mmutest.c
-	$(CROSS_COMPILE)ld -o mmutest.elf -T link.lds $(LDFLAGS) mmutest.o init.o
-	$(OBJCOPY) -O binary -j .text -j .data mmutest.elf $@
-
-
-uart.asmbin: uart.c mmio.h init.o
+uart.asmbin: uart.c mmio.h init.o link.lds
 	$(CC) $(CFLAGS) -c -o uart.o uart.c
 	$(CROSS_COMPILE)ld -o uart.elf -T link.lds $(LDFLAGS) uart.o init.o
 	$(OBJCOPY) -O binary -j .text -j .data uart.elf $@
+
+shell.asmbin: shell.c mmio.h init.o link.lds
+	$(CC) $(CFLAGS) -c -o shell.o shell.c
+	$(CROSS_COMPILE)ld -o shell.elf -T link.lds $(LDFLAGS) shell.o init.o
+	$(OBJCOPY) -O binary -j .text -j .data shell.elf $@
 
 init.o: init.S
 	$(AS) -R $(ASFLAGS) -o $@ $<
@@ -53,12 +57,15 @@ endif
 # Nyancat build depends on generated data
 nyancat.o: nyancat.c nyancat-data.h
 
-update: nyancat.asmbin uart.asmbin mmutest.asmbin
-	cp -f nyancat.asmbin mmutest.asmbin uart.asmbin ../src/main/resources
+update: $(BINARIES)
+	cp -f $(BINARIES) ../src/main/resources
 	@echo ""
-	@echo "Updated nyancat.asmbin and uart.asmbin  and mmutest.asmbin to ../src/main/resources"
+	@echo "Updated $(BINARIES) to ../src/main/resources"
 
 clean:
 	$(RM) *.o *.elf *.asmbin init_minimal.S nyancat-data.h
 
-.PHONY: all update clean
+# Convenience targets (prevent implicit rule interference)
+$(PROGRAMS): %: %.asmbin
+
+.PHONY: all update clean $(PROGRAMS)

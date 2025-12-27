@@ -8,6 +8,23 @@ import chisel3._
 import riscv.core.PipelineRegister
 import riscv.Parameters
 
+/**
+ * MEM/WB Pipeline Register: Memory Access to Write Back boundary.
+ *
+ * Buffers the final data source selection inputs: ALU result, memory read data,
+ * CSR read data, or PC+4 (for JAL/JALR link address). The WriteBack stage
+ * selects among these based on regs_write_source.
+ *
+ * Key signals buffered:
+ * - alu_result: Forwarded for non-memory ALU operations
+ * - memory_read_data: Load result after byte/half extraction and sign-extension
+ * - instruction_address: Used to compute PC+4 for JAL/JALR writeback
+ * - regs_write_*: Register file write control signals
+ *
+ * Critical timing note: The inputs to this register come from MemoryAccess's
+ * latched outputs (wb_*), not from ex2mem, to preserve correct values across
+ * multi-cycle AXI transactions. See MemoryAccess.scala for details.
+ */
 class MEM2WB extends Module {
   val io = IO(new Bundle() {
     val stall               = Input(Bool())
