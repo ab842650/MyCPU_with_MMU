@@ -28,15 +28,44 @@ class MMU extends Module {
     val enable = Input(Bool()) // satp.mode != 0
     val satp = Input(UInt(Parameters.DataWidth))
   })
+    // =============================
+    // Page Table Walker (skeleton)
+    // =============================
+    object PTWState {
+    val idle :: walk :: fault :: Nil = Enum(3)
+    }
+    val ptw_state = RegInit(PTWState.idle)
 
-  // Toy translation: +0x100 when enabled, otherwise pass-through
-  val i_pa_toy = io.i_va + 0x100.U
-  val d_pa_toy = io.d_va + 0x100.U
 
-  io.i_pa := Mux(io.enable, i_pa_toy, io.i_va)
-  io.d_pa := Mux(io.enable, d_pa_toy, io.d_va)
+    // =============================
+    // satp decode (Sv32-ready)
+    // =============================
+    val satp_mode = io.satp(31)        // 1 = Sv32
+    val satp_asid = io.satp(30, 22)    // ASID (unused for now)
+    val satp_ppn  = io.satp(21, 0)     // Root page table PPN
 
-  // For now: no stall, no fault
+
+
+    // =============================
+    // Translation backend (toy for now)
+    // =============================
+    val i_pa_translated = Wire(UInt(Parameters.AddrWidth))
+    val d_pa_translated = Wire(UInt(Parameters.AddrWidth))
+
+    // default: pass-through
+    i_pa_translated := io.i_va
+    d_pa_translated := io.d_va
+
+    when(io.enable) {
+    // toy translation (will be replaced by PTW)
+    i_pa_translated := io.i_va + 0x100.U
+    d_pa_translated := io.d_va + 0x100.U
+    }
+
+    io.i_pa := i_pa_translated
+    io.d_pa := d_pa_translated
+
+  // For now: PTW not implemented, never stall or fault
   io.i_stall := false.B
   io.d_stall := false.B
   io.i_fault := false.B
