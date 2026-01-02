@@ -31,10 +31,7 @@ class MMU extends Module {
     // =============================
     // Page Table Walker (skeleton)
     // =============================
-    object PTWState {
-    val idle :: walk :: fault :: Nil = Enum(3)
-    }
-    val ptw_state = RegInit(PTWState.idle)
+
 
 
     // =============================

@@ -29,7 +29,7 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
         .address(Parameters.AddrBits - Parameters.SlaveDeviceCountBits - 1, 0)
 
 
-
+      // mmu
       val mmu = Module(new MMU)
       mmu.io.enable := true.B
       mmu.io.satp := cpu.io.satp_out

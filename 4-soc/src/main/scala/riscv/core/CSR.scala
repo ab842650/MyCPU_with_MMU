@@ -22,6 +22,24 @@ class CSRDirectAccessBundle extends Bundle {
   val mtval_write_data = Output(UInt(Parameters.DataWidth))
 
   val direct_write_enable = Output(Bool())
+
+
+  /* ======================
+   * Supervisor-mode CSRs
+   * ====================== */
+  val sstatus = Input(UInt(Parameters.DataWidth  ))
+  val sepc    = Input(UInt(Parameters.DataWidth))
+  val scause  = Input(UInt(Parameters.DataWidth))
+  val stvec   = Input(UInt(Parameters.DataWidth))
+  val stval   = Input(UInt(Parameters.DataWidth))
+  val sscratch = Input(UInt(Parameters.DataWidth))
+
+  val sstatus_write_data = Output(UInt(Parameters.DataWidth))
+  val sepc_write_data    = Output(UInt(Parameters.DataWidth))
+  val scause_write_data  = Output(UInt(Parameters.DataWidth))
+  val stval_write_data   = Output(UInt(Parameters.DataWidth))
+
+  val direct_write_enable_s = Output(Bool())
 }
 
 object CSRRegister {
@@ -34,6 +52,15 @@ object CSRRegister {
   val MEPC     = 0x341.U(Parameters.CSRRegisterAddrWidth)
   val MCAUSE   = 0x342.U(Parameters.CSRRegisterAddrWidth)
   val MTVAL = 0x343.U(Parameters.CSRRegisterAddrWidth)
+
+  // Supervisor trap setup/handling
+
+  val SSTATUS  = 0x100.U(Parameters.CSRRegisterAddrWidth)
+  val STVEC    = 0x105.U(Parameters.CSRRegisterAddrWidth)
+  val SSCRATCH = 0x140.U(Parameters.CSRRegisterAddrWidth)
+  val SEPC     = 0x141.U(Parameters.CSRRegisterAddrWidth)
+  val SCAUSE   = 0x142.U(Parameters.CSRRegisterAddrWidth)
+  val STVAL    = 0x143.U(Parameters.CSRRegisterAddrWidth)
   val SATP     = 0x180.U(Parameters.CSRRegisterAddrWidth) // for mmu
 
   // Machine Counter/Timers (read-only shadows at 0xC00+)
@@ -133,6 +160,15 @@ object CSRRegister {
  * - When CSR write and counter increment occur in same cycle, write wins
  * - Written value will be incremented by 1 on next cycle (for mcycle)
  */
+ // object for  priv mode
+object PrivMode {
+  val S = 1.U(2.W)
+  val M = 3.U(2.W)
+}
+
+
+
+
 class CSR extends Module {
   val io = IO(new Bundle {
     val reg_read_address_id    = Input(UInt(Parameters.CSRRegisterAddrWidth))
@@ -146,7 +182,11 @@ class CSR extends Module {
 
     val clint_access_bundle = Flipped(new CSRDirectAccessBundle)
 
+    //mmu
     val satp_out = Output(UInt(Parameters.DataWidth))
+    
+    //priv mode
+    val priv_mode_out = Output(UInt(2.W))
 
     // Performance counter inputs (directly from pipeline stages)
     val instruction_retired  = Input(Bool()) // Instruction completed in WB stage
@@ -162,6 +202,11 @@ class CSR extends Module {
   val satp = RegInit(0.U(Parameters.DataWidth))
   io.satp_out := satp
 
+  // current priv
+  val priv = RegInit(PrivMode.M)
+  //priv mode
+  io.priv_mode_out := priv
+
   // Machine Trap Setup/Handling Registers
   val mstatus  = RegInit(UInt(Parameters.DataWidth), 0.U)
   val mie      = RegInit(UInt(Parameters.DataWidth), 0.U)
@@ -170,6 +215,16 @@ class CSR extends Module {
   val mepc     = RegInit(UInt(Parameters.DataWidth), 0.U)
   val mcause   = RegInit(UInt(Parameters.DataWidth), 0.U)
   val mtval = RegInit(UInt(Parameters.DataWidth), 0.U)
+
+  // Supervisor Trap Setup/Handling Registers
+  val sstatus  = RegInit(0.U(Parameters.DataWidth))
+  val stvec    = RegInit(0.U(Parameters.DataWidth))
+  val sscratch = RegInit(0.U(Parameters.DataWidth))
+  val sepc     = RegInit(0.U(Parameters.DataWidth))
+  val scause   = RegInit(0.U(Parameters.DataWidth))
+  val stval    = RegInit(0.U(Parameters.DataWidth))
+
+
 
   // Machine Counter-Inhibit Register (mcountinhibit)
   // Bit 0: CY - inhibit mcycle, Bit 2: IR - inhibit minstret
@@ -295,8 +350,16 @@ class CSR extends Module {
       CSRRegister.MEPC     -> mepc,
       CSRRegister.MCAUSE   -> mcause,
       CSRRegister.MTVAL -> mtval,
-      // mmu
-      CSRRegister.SATP -> satp,
+
+      // Supervisor trap registers
+      CSRRegister.SSTATUS  -> sstatus,
+      CSRRegister.STVEC    -> stvec,
+      CSRRegister.SSCRATCH -> sscratch,
+      CSRRegister.SEPC     -> sepc,
+      CSRRegister.SCAUSE   -> scause,
+      CSRRegister.STVAL    -> stval,
+      CSRRegister.SATP -> satp,//mmu
+
       // Machine counter-inhibit register
       CSRRegister.MCOUNTINHIBIT -> mcountinhibit,
       // User-mode read-only shadows (0xC00+)
@@ -378,6 +441,16 @@ class CSR extends Module {
     }
   }
 
+  // ---- default assignments for CLINT access bundle (S-mode) ----
+  io.clint_access_bundle.sstatus := sstatus
+  io.clint_access_bundle.stvec := stvec
+  io.clint_access_bundle.sscratch := sscratch
+  io.clint_access_bundle.sepc := sepc
+  io.clint_access_bundle.scause := scause
+  io.clint_access_bundle.stval := stval
+
+
+
   when(io.reg_write_enable_ex) {
     when(io.reg_write_address_ex === CSRRegister.MIE) {
       mie := io.reg_write_data_ex
@@ -387,6 +460,18 @@ class CSR extends Module {
       mscratch := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_ex === CSRRegister.SATP) {
     satp := io.reg_write_data_ex //mmu
+    }.elsewhen(io.reg_write_address_ex === CSRRegister.SSTATUS) {
+      sstatus := io.reg_write_data_ex
+    }.elsewhen(io.reg_write_address_ex === CSRRegister.STVEC) {
+      stvec := io.reg_write_data_ex
+    }.elsewhen(io.reg_write_address_ex === CSRRegister.SSCRATCH) {
+      sscratch := io.reg_write_data_ex
+    }.elsewhen(io.reg_write_address_ex === CSRRegister.SEPC) {
+      sepc := io.reg_write_data_ex
+    }.elsewhen(io.reg_write_address_ex === CSRRegister.SCAUSE) {
+      scause := io.reg_write_data_ex
+    }.elsewhen(io.reg_write_address_ex === CSRRegister.STVAL) {
+      stval := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_ex === CSRRegister.MCOUNTINHIBIT) {
       // Only bits 0, 2, 3-9 are writable (bit 1 is reserved, upper bits hardwired to 0)
       // Mask: 0x000003fd = bits 0,2,3,4,5,6,7,8,9 (skip bit 1, clear bits 10-31)

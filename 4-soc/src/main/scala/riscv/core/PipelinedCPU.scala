@@ -486,6 +486,7 @@ class PipelinedCPU extends Module {
   clint.io.jump_address           := id.io.clint_jump_address
   clint.io.interrupt_flag         := io.interrupt_flag // Direct connection, bypass IF2ID pipeline delay
   clint.io.csr_bundle <> csr_regs.io.clint_access_bundle
+  clint.io.priv_mode := csr_regs.io.priv_mode_out //priv mode
 
   csr_regs.io.reg_read_address_id    := id.io.ex_csr_address
   csr_regs.io.reg_write_enable_ex    := id2ex.io.output_csr_write_enable
@@ -496,6 +497,9 @@ class PipelinedCPU extends Module {
 
   //satp
   io.satp_out := csr_regs.io.satp_out
+
+ 
+
 
   // Performance counter connections
   //
