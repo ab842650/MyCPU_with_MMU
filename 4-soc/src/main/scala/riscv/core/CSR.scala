@@ -40,6 +40,10 @@ class CSRDirectAccessBundle extends Bundle {
   val stval_write_data   = Output(UInt(Parameters.DataWidth))
 
   val direct_write_enable_s = Output(Bool())
+
+  // ---- privilege mode update (from CLINT) ----
+  val priv_write_enable = Output(Bool())
+  val priv_write_data   = Output(UInt(2.W))
 }
 
 object CSRRegister {
@@ -425,12 +429,49 @@ class CSR extends Module {
   io.reg_write_data_ex,
   mtval
 )
+  // s mode write
+  io.clint_access_bundle.sstatus := Mux(
+    io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.SSTATUS,
+    io.reg_write_data_ex,
+    sstatus
+  )
+  io.clint_access_bundle.stvec := Mux(
+    io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.STVEC,
+    io.reg_write_data_ex,
+    stvec
+  )
+  io.clint_access_bundle.scause := Mux(
+    io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.SCAUSE,
+    io.reg_write_data_ex,
+    scause
+  )
+  io.clint_access_bundle.sepc := Mux(
+    io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.SEPC,
+    io.reg_write_data_ex,
+    sepc
+  )
+  io.clint_access_bundle.sscratch := Mux(
+    io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.SSCRATCH,
+    io.reg_write_data_ex,
+    sscratch
+  )
+  io.clint_access_bundle.stval := Mux(
+  io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.STVAL,
+  io.reg_write_data_ex,
+  stval
+)
 
-  when(io.clint_access_bundle.direct_write_enable) {
+
+  when(io.clint_access_bundle.direct_write_enable) {//m mode
     mstatus := io.clint_access_bundle.mstatus_write_data
     mepc    := io.clint_access_bundle.mepc_write_data
     mcause  := io.clint_access_bundle.mcause_write_data
     mtval := io.clint_access_bundle.mtval_write_data
+  }.elsewhen(io.clint_access_bundle.direct_write_enable_s){//s mode
+    sstatus := io.clint_access_bundle.sstatus_write_data
+    sepc    := io.clint_access_bundle.sepc_write_data
+    scause  := io.clint_access_bundle.scause_write_data
+    stval   := io.clint_access_bundle.stval_write_data
   }.elsewhen(io.reg_write_enable_ex) {
     when(io.reg_write_address_ex === CSRRegister.MSTATUS) {
       mstatus := io.reg_write_data_ex
@@ -441,15 +482,10 @@ class CSR extends Module {
     }
   }
 
-  // ---- default assignments for CLINT access bundle (S-mode) ----
-  io.clint_access_bundle.sstatus := sstatus
-  io.clint_access_bundle.stvec := stvec
-  io.clint_access_bundle.sscratch := sscratch
-  io.clint_access_bundle.sepc := sepc
-  io.clint_access_bundle.scause := scause
-  io.clint_access_bundle.stval := stval
-
-
+  // s mode
+  when (io.clint_access_bundle.priv_write_enable) {
+    priv := io.clint_access_bundle.priv_write_data
+  }
 
   when(io.reg_write_enable_ex) {
     when(io.reg_write_address_ex === CSRRegister.MIE) {

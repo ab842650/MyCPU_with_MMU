@@ -96,6 +96,7 @@ object InstructionsNop {
 
 object InstructionsRet {
   val mret = 0x30200073L.U(Parameters.DataWidth)
+  val sret = 0x10200073L.U(Parameters.DataWidth)
   val ret  = 0x00008067L.U(Parameters.DataWidth)
 }
 

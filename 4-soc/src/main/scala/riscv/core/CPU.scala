@@ -99,7 +99,7 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
 
       when(start_bus_transaction) {
         bus_address_reg := next_bus_address
-        printf(p"[MMU] VA=0x${Hexadecimal(full_bus_address)} PA=0x${Hexadecimal(pa)}\n")
+        //printf(p"[MMU] VA=0x${Hexadecimal(full_bus_address)} PA=0x${Hexadecimal(pa)}\n")
       }
 
       io.bus_address := bus_address_reg

@@ -18,15 +18,14 @@ verilator:
 			exit 1; \
 		fi; \
 	fi
-	cd verilog/verilator && verilator --exe --cc sim.cpp Top.v \
+	cd verilog/verilator && verilator --exe --cc sim.cpp Top.v --trace \
 		-CFLAGS "$$(sdl2-config --cflags)" \
 		-LDFLAGS "$$(sdl2-config --libs)" && \
 		make -C obj_dir -f VTop.mk
 
 sim: verilator
 	@if [ -z "$(BINARY)" ]; then \
-		echo "Usage: make sim BINARY=<path/to/file.asmbin>"; \
-		echo "Example: make sim BINARY=csrc/nyancat.asmbin"; \
+		echo "Usage: make sim BINARY=<path/to/file.asmbin> [VCD=dump.vcd]"; \
 		exit 1; \
 	fi
 	@if [ ! -f "$(BINARY)" ]; then \
@@ -34,7 +33,7 @@ sim: verilator
 		exit 1; \
 	fi
 	@echo "🎮 Running simulation with $(BINARY)..."
-	cd verilog/verilator/obj_dir && ./VTop -i ../../../$(BINARY)
+	cd verilog/verilator/obj_dir && ./VTop -i ../../../$(BINARY) $(if $(VCD),--vcd ../../../$(VCD),)
 
 check-vga: verilator
 	@echo "🔄 Building nyancat binary..."

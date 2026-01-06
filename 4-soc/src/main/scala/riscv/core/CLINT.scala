@@ -37,8 +37,9 @@ class CLINT extends Module {
   val interrupt_enable_timer    = io.csr_bundle.mie(7)     // MTIE bit (timer enable)
   val interrupt_enable_external = io.csr_bundle.mie(11)    // MEIE bit (external enable)
 
-  val cur_priv = Mux(io.priv_mode === 0.U, PrivMode.M, io.priv_mode) // for testing
+  //val cur_priv = Mux(io.priv_mode === 0.U, PrivMode.M, io.priv_mode) // for testing
 
+  val cur_priv = io.priv_mode
 
   val instruction_address = Mux(
     io.jump_flag,
@@ -60,6 +61,18 @@ class CLINT extends Module {
     interrupt_enable_timer,
     interrupt_enable_external
   )
+  // Trap entry: SIE (bit 1) -> SPIE (bit 5), then clear SIE
+  val sstatus_disable_interrupt =
+    io.csr_bundle.sstatus(31, 6) ## io.csr_bundle.sstatus(1) ## io.csr_bundle.sstatus(4, 2) ## 0.U(1.W) ## io.csr_bundle.sstatus(0)
+
+  // sret: SPIE (bit 5) -> SIE (bit 1), then set SPIE to 1
+  val sstatus_recover_interrupt =
+    io.csr_bundle.sstatus(31, 6) ## 1.U(1.W) ## io.csr_bundle.sstatus(4, 2) ## io.csr_bundle.sstatus(5) ## io.csr_bundle.sstatus(0)
+  // mpp for mret
+  val mpp = io.csr_bundle.mstatus(12,11)
+  // next priv for mpp
+  val nextPriv = Mux(mpp === "b01".U, PrivMode.S, PrivMode.M) 
+
 
   // ---- default assignments (avoid unconnected wires) ----
   io.csr_bundle.sstatus_write_data := io.csr_bundle.sstatus
@@ -67,6 +80,8 @@ class CLINT extends Module {
   io.csr_bundle.scause_write_data  := io.csr_bundle.scause
   io.csr_bundle.stval_write_data   := io.csr_bundle.stval
   io.csr_bundle.direct_write_enable_s := false.B
+  io.csr_bundle.priv_write_enable := false.B
+  io.csr_bundle.priv_write_data   := io.priv_mode   // 或者 PrivMode.M，都可
   
 
   // M-mode defaults
@@ -78,6 +93,7 @@ class CLINT extends Module {
 
   io.id_interrupt_assert := false.B
   io.id_interrupt_handler_address := 0.U
+
 
 
   when (cur_priv === PrivMode.M){
@@ -113,6 +129,9 @@ class CLINT extends Module {
       io.id_interrupt_assert            := true.B
       io.id_interrupt_handler_address   := io.csr_bundle.mepc
       io.csr_bundle.mtval_write_data := 0.U
+      // handle  priv
+      io.csr_bundle.priv_write_enable := true.B
+      io.csr_bundle.priv_write_data   := nextPriv
     }.otherwise {
       io.csr_bundle.mstatus_write_data  := io.csr_bundle.mstatus
       io.csr_bundle.mepc_write_data     := io.csr_bundle.mepc
@@ -122,7 +141,32 @@ class CLINT extends Module {
       io.id_interrupt_handler_address   := 0.U
     }
   }
-  .elsewhen (io.priv_mode === PrivMode.S){
+  .elsewhen (cur_priv === PrivMode.S){
+    when(io.instruction_id === InstructionsEnv.ecall || io.instruction_id === InstructionsEnv.ebreak) {
+      io.csr_bundle.sstatus_write_data := sstatus_disable_interrupt
+      io.csr_bundle.sepc_write_data    := instruction_address
+      io.csr_bundle.scause_write_data := MuxLookup(
+        io.instruction_id,
+        9.U
+      )(
+        IndexedSeq(
+          InstructionsEnv.ecall  -> 9.U,
+          InstructionsEnv.ebreak -> 3.U,
+        )
+      )
+      io.csr_bundle.direct_write_enable_s := true.B
+      io.id_interrupt_assert            := true.B
+      io.id_interrupt_handler_address   := io.csr_bundle.stvec
+      io.csr_bundle.stval_write_data := 0.U
+
+    }.elsewhen(io.instruction_id === InstructionsRet.sret) {
+    io.csr_bundle.sstatus_write_data := sstatus_recover_interrupt
+    io.csr_bundle.direct_write_enable_s := true.B
+    io.id_interrupt_assert := true.B
+    io.id_interrupt_handler_address := io.csr_bundle.sepc
+    io.csr_bundle.priv_write_enable := true.B
+    io.csr_bundle.priv_write_data   := PrivMode.S  
+  }
 
   }.otherwise{
 

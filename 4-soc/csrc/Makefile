@@ -12,7 +12,7 @@ LD := $(CROSS_COMPILE)ld
 OBJCOPY := $(CROSS_COMPILE)objcopy
 
 # Program targets (add new programs here)
-PROGRAMS := nyancat uart shell
+PROGRAMS := nyancat uart shell s_mode_test
 BINARIES := $(PROGRAMS:%=%.asmbin)
 
 %.asmbin: %.elf
@@ -37,6 +37,14 @@ shell.asmbin: shell.c mmio.h init.o link.lds
 	$(CC) $(CFLAGS) -c -o shell.o shell.c
 	$(CROSS_COMPILE)ld -o shell.elf -T link.lds $(LDFLAGS) shell.o init.o
 	$(OBJCOPY) -O binary -j .text -j .data shell.elf $@
+
+#test s mode
+s_mode_test.asmbin: s_mode_test.S init.o link.lds
+	$(CC) $(CFLAGS) -c -o s_mode_test.o s_mode_test.S
+	$(CROSS_COMPILE)ld -o s_mode_test.elf -T link.lds $(LDFLAGS) s_mode_test.o init.o
+	$(OBJCOPY) -O binary -j .text.init -j .text -j .rodata -j .data s_mode_test.elf $@
+
+
 
 init.o: init.S
 	$(AS) -R $(ASFLAGS) -o $@ $<

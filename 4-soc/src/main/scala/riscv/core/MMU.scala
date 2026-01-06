@@ -53,11 +53,11 @@ class MMU extends Module {
     i_pa_translated := io.i_va
     d_pa_translated := io.d_va
 
-    when(io.enable) {
+    //when(io.enable) {
     // toy translation (will be replaced by PTW)
-    i_pa_translated := io.i_va + 0x100.U
-    d_pa_translated := io.d_va + 0x100.U
-    }
+    //i_pa_translated := io.i_va + 0x100.U
+    //d_pa_translated := io.d_va + 0x100.U
+    //}
 
     io.i_pa := i_pa_translated
     io.d_pa := d_pa_translated
@@ -72,9 +72,9 @@ class MMU extends Module {
    * Debug
    * ============================= */
   when(io.enable && io.i_valid) {
-    printf(p"[I-MMU] VA=0x${Hexadecimal(io.i_va)} PA=0x${Hexadecimal(io.i_pa)}\n")
+    //printf(p"[I-MMU] VA=0x${Hexadecimal(io.i_va)} PA=0x${Hexadecimal(io.i_pa)}\n")
   }
   when(io.enable && io.d_valid) {
-    printf(p"[D-MMU] VA=0x${Hexadecimal(io.d_va)} PA=0x${Hexadecimal(io.d_pa)}\n")
+    //printf(p"[D-MMU] VA=0x${Hexadecimal(io.d_va)} PA=0x${Hexadecimal(io.d_pa)}\n")
   }
 }

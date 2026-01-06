@@ -3,6 +3,7 @@
 // "LICENSE" for information on usage and redistribution of this file.
 
 #include <verilated.h>
+#include <verilated_vcd_c.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -22,6 +23,36 @@
 
 static constexpr uint32_t UART_TEST_PASS = 0x0F;  // 4 subtests
 static constexpr uint32_t VGA_TEST_PASS = 0x3F;   // 6 subtests
+
+//dump waveform
+class VCDTracer {
+    VerilatedVcdC *tfp = nullptr;
+
+public:
+    void enable(const char *filename, VTop &top) {
+        Verilated::traceEverOn(true);
+        tfp = new VerilatedVcdC;
+        top.trace(tfp, 99);
+        tfp->open(filename);
+        if (!tfp->isOpen()) {
+            throw std::runtime_error(std::string("Failed to open VCD file: ") + filename);
+        }
+    }
+
+    void dump(vluint64_t time) {
+        if (tfp) tfp->dump(time);
+    }
+
+    bool enabled() const { return tfp != nullptr; }
+
+    ~VCDTracer() {
+        if (tfp) {
+            tfp->close();
+            delete tfp;
+        }
+    }
+};
+
 
 // UART terminal interface for interactive mode
 // Simulates 115200 baud, 8N2 (8 data bits, no parity, 2 stop bits)
@@ -326,6 +357,7 @@ int main(int argc, char **argv)
 {
     Verilated::commandArgs(argc, argv);
 
+    const char *vcd_path = nullptr;
     const char *binary = nullptr;
     bool headless = false;
     bool interactive_mode = false;
@@ -337,10 +369,21 @@ int main(int argc, char **argv)
             headless = true;
         else if (!strcmp(argv[i], "--terminal") || !strcmp(argv[i], "-t"))
             interactive_mode = true;
+        else if (!strcmp(argv[i], "--vcd") && i + 1 < argc)
+            vcd_path = argv[++i];
+
     }
 
     auto top = std::make_unique<VTop>();
     Memory mem(4 * 1024 * 1024);  // 4MB (stack starts at 0x400000)
+    //vcd trace
+    VCDTracer vcd;
+    vluint64_t vcd_time = 0;
+
+    if (vcd_path) {
+        vcd.enable(vcd_path, *top);
+        std::cout << "VCD enabled: " << vcd_path << "\n";
+    }
 
     if (!binary) {
         std::cerr
@@ -400,6 +443,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < 5; i++) {
         top->clock = !top->clock;
         top->eval();
+        if (vcd_path) vcd.dump(vcd_time++);
     }
     top->reset = 0;
 
@@ -435,7 +479,7 @@ int main(int argc, char **argv)
         // This creates a stable snapshot of all DUT outputs for this clock
         // edge.
         top->eval();
-
+        if (vcd_path) vcd.dump(vcd_time++);
         // =====================================================================
         // CAPTURE PHASE: Snapshot all DUT outputs immediately after eval().
         // This implements the "Capture and Defer" pattern recommended for
@@ -604,6 +648,7 @@ int main(int argc, char **argv)
         // Final eval() to propagate input changes (RXD, memory responses)
         // before the next clock edge. This settles combinational logic.
         top->eval();
+        if (vcd_path) vcd.dump(vcd_time++);
         inst = mem.read(top->io_instruction_address);
         cycle++;
     }
