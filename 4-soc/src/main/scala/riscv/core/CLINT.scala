@@ -46,14 +46,39 @@ class CLINT extends Module {
     io.jump_address,
     io.instruction_address_if,
   )
-  // Trap entry: MIE (bit 3) -> MPIE (bit 7), then clear MIE
+
+  // Encode previous privilege into MPP (00=U, 01=S, 11=M)
+  // only implement S/M, so map: S->01, M->11
+  val prev_mpp = Mux(cur_priv === PrivMode.S, "b01".U(2.W), "b11".U(2.W))
+
+  // Trap entry to M-mode:
+  // MPP  <= prev privilege
+  // MPIE <= old MIE
+  // MIE  <= 0
   val mstatus_disable_interrupt =
-    io.csr_bundle.mstatus(31, 8) ## io.csr_bundle.mstatus(3) ## io.csr_bundle.mstatus(6, 4) ## 0.U(1.W) ## io.csr_bundle
-      .mstatus(2, 0)
-  // mret: MPIE (bit 7) -> MIE (bit 3), then set MPIE to 1
+    io.csr_bundle.mstatus(31, 13) ##      // keep [31:13]
+    prev_mpp ##                           // MPP[12:11] <- prev mode
+    io.csr_bundle.mstatus(10, 8) ##       // keep [10:8]
+    io.csr_bundle.mstatus(3) ##           // MPIE (bit 7) <- old MIE (bit 3)
+    io.csr_bundle.mstatus(6, 4) ##        // keep [6:4]
+    0.U(1.W) ##                           // MIE  (bit 3) <- 0
+    io.csr_bundle.mstatus(2, 0)           // keep [2:0]
+  
+
+  // mret: MIE <- MPIE, MPIE <- 1, and clear MPP (bits 12:11) to 00
   val mstatus_recover_interrupt =
-    io.csr_bundle.mstatus(31, 8) ## 1.U(1.W) ## io.csr_bundle.mstatus(6, 4) ## io.csr_bundle.mstatus(7) ## io.csr_bundle
-      .mstatus(2, 0)
+    io.csr_bundle.mstatus(31, 13) ##           // keep [31:13]
+    0.U(2.W) ##                                // MPP[12:11] <- 00
+    io.csr_bundle.mstatus(10, 8) ##            // keep [10:8]
+    1.U(1.W) ##                                // MPIE (bit 7) <- 1
+    io.csr_bundle.mstatus(6, 4) ##             // keep [6:4]
+    io.csr_bundle.mstatus(7) ##                // MIE (bit 3) <- old MPIE (bit 7)
+    io.csr_bundle.mstatus(2, 0)                // keep [2:0]
+
+    // mpp for mret
+  val mpp = io.csr_bundle.mstatus(12,11)
+  // next priv for mpp
+  val nextPriv = Mux(mpp === "b01".U, PrivMode.S, PrivMode.M)
 
   // Check individual interrupt source enable based on interrupt type
   val interrupt_source_enabled = Mux(
@@ -61,17 +86,28 @@ class CLINT extends Module {
     interrupt_enable_timer,
     interrupt_enable_external
   )
-  // Trap entry: SIE (bit 1) -> SPIE (bit 5), then clear SIE
-  val sstatus_disable_interrupt =
-    io.csr_bundle.sstatus(31, 6) ## io.csr_bundle.sstatus(1) ## io.csr_bundle.sstatus(4, 2) ## 0.U(1.W) ## io.csr_bundle.sstatus(0)
 
-  // sret: SPIE (bit 5) -> SIE (bit 1), then set SPIE to 1
+  // Trap entry to S-mode:
+  // SPIE <= SIE, SIE <= 0, SPP <= 1 (prev = S; no U-mode implemented)
+  val sstatus_disable_interrupt =
+    io.csr_bundle.sstatus(31, 9) ##    // keep [31:9]
+    1.U(1.W) ##                         // SPP  (bit 8)  <- 1 (prev = S; no U-mode implemented)
+    io.csr_bundle.sstatus(7, 6) ##      // keep [7:6]
+    io.csr_bundle.sstatus(1) ##         // SPIE (bit 5)  <- old SIE (bit 1) 
+    io.csr_bundle.sstatus(4, 2) ##      // keep [4:2]
+    0.U(1.W) ##                         // SIE  (bit 1)  <- 0
+    io.csr_bundle.sstatus(0)            // keep bit 0
+
+  // sret:
+  // SIE <= SPIE, SPIE <= 1, SPP <= 0
   val sstatus_recover_interrupt =
-    io.csr_bundle.sstatus(31, 6) ## 1.U(1.W) ## io.csr_bundle.sstatus(4, 2) ## io.csr_bundle.sstatus(5) ## io.csr_bundle.sstatus(0)
-  // mpp for mret
-  val mpp = io.csr_bundle.mstatus(12,11)
-  // next priv for mpp
-  val nextPriv = Mux(mpp === "b01".U, PrivMode.S, PrivMode.M) 
+    io.csr_bundle.sstatus(31, 9) ##    // keep [31:9]
+    0.U(1.W) ##                         // SPP  (bit 8)  <- 0
+    io.csr_bundle.sstatus(7, 6) ##      // keep [7:6]
+    1.U(1.W) ##                         // SPIE (bit 5)  <- 1
+    io.csr_bundle.sstatus(4, 2) ##      // keep [4:2]
+    io.csr_bundle.sstatus(5) ##         // SIE  (bit 1)  <- old SPIE (bit 5)
+    io.csr_bundle.sstatus(0)            // keep bit 0
 
 
   // ---- default assignments (avoid unconnected wires) ----

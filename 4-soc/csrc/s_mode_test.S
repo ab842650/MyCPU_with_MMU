@@ -62,6 +62,7 @@ s_main:
 
     li      t0, 0x53300002
     csrw    sscratch, t0
+    
 
     ecall
 
