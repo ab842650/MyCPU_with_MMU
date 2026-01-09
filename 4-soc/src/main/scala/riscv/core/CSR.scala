@@ -23,6 +23,8 @@ class CSRDirectAccessBundle extends Bundle {
 
   val direct_write_enable = Output(Bool())
 
+  val medeleg = Input(UInt(64.W))
+
 
   /* ======================
    * Supervisor-mode CSRs
@@ -56,6 +58,9 @@ object CSRRegister {
   val MEPC     = 0x341.U(Parameters.CSRRegisterAddrWidth)
   val MCAUSE   = 0x342.U(Parameters.CSRRegisterAddrWidth)
   val MTVAL = 0x343.U(Parameters.CSRRegisterAddrWidth)
+
+  // Machine exception delegation
+  val MEDELEG = 0x302.U(Parameters.CSRRegisterAddrWidth)
 
   // Supervisor trap setup/handling
 
@@ -221,12 +226,27 @@ class CSR extends Module {
   val mtval = RegInit(UInt(Parameters.DataWidth), 0.U)
 
   // Supervisor Trap Setup/Handling Registers
-  val sstatus  = RegInit(0.U(Parameters.DataWidth))
+
   val stvec    = RegInit(0.U(Parameters.DataWidth))
   val sscratch = RegInit(0.U(Parameters.DataWidth))
   val sepc     = RegInit(0.U(Parameters.DataWidth))
   val scause   = RegInit(0.U(Parameters.DataWidth))
   val stval    = RegInit(0.U(Parameters.DataWidth))
+
+  val SSTATUS_MASK = ( //mask mstatus to retrive sstatus
+    (1.U << 1)  |  // SIE
+    (1.U << 5)  |  // SPIE
+    (1.U << 8)  |  // SPP
+    (1.U << 18) |  // SUM
+    (1.U << 19)    // MXR
+  ).asUInt
+
+  val sstatus_view = mstatus & SSTATUS_MASK 
+
+  // Medeleg for exception
+  // When bit i is 1, exception cause i is delegated to S-mode (when possible).
+  // (RV32) medeleg is a machine-level CSR at 0x302.
+  val medeleg = RegInit(0.U(64.W)) // 64bit (spec)
 
 
 
@@ -354,9 +374,10 @@ class CSR extends Module {
       CSRRegister.MEPC     -> mepc,
       CSRRegister.MCAUSE   -> mcause,
       CSRRegister.MTVAL -> mtval,
+      CSRRegister.MEDELEG  -> medeleg(31, 0),//delegation cuurently read low 32 bit
 
       // Supervisor trap registers
-      CSRRegister.SSTATUS  -> sstatus,
+      CSRRegister.SSTATUS  -> (mstatus & SSTATUS_MASK),
       CSRRegister.STVEC    -> stvec,
       CSRRegister.SSCRATCH -> sscratch,
       CSRRegister.SEPC     -> sepc,
@@ -425,15 +446,22 @@ class CSR extends Module {
     mie
   )
   io.clint_access_bundle.mtval := Mux(
-  io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.MTVAL,
-  io.reg_write_data_ex,
-  mtval
-)
+    io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.MTVAL,
+    io.reg_write_data_ex,
+    mtval
+  )
+
+  io.clint_access_bundle.medeleg := Mux(
+    io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.MEDELEG,
+    io.reg_write_data_ex,        
+    medeleg(31, 0)               
+  )
+
   // s mode write
   io.clint_access_bundle.sstatus := Mux(
     io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.SSTATUS,
-    io.reg_write_data_ex,
-    sstatus
+    io.reg_write_data_ex & SSTATUS_MASK,
+    sstatus_view
   )
   io.clint_access_bundle.stvec := Mux(
     io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.STVEC,
@@ -459,7 +487,7 @@ class CSR extends Module {
   io.reg_write_enable_ex && io.reg_write_address_ex === CSRRegister.STVAL,
   io.reg_write_data_ex,
   stval
-)
+  )
 
 
   when(io.clint_access_bundle.direct_write_enable) {//m mode
@@ -468,7 +496,7 @@ class CSR extends Module {
     mcause  := io.clint_access_bundle.mcause_write_data
     mtval := io.clint_access_bundle.mtval_write_data
   }.elsewhen(io.clint_access_bundle.direct_write_enable_s){//s mode
-    sstatus := io.clint_access_bundle.sstatus_write_data
+    mstatus := (mstatus & ~SSTATUS_MASK) | (io.clint_access_bundle.sstatus_write_data & SSTATUS_MASK)
     sepc    := io.clint_access_bundle.sepc_write_data
     scause  := io.clint_access_bundle.scause_write_data
     stval   := io.clint_access_bundle.stval_write_data
@@ -494,10 +522,12 @@ class CSR extends Module {
       mtvec := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_ex === CSRRegister.MSCRATCH) {
       mscratch := io.reg_write_data_ex
+    }.elsewhen(io.reg_write_address_ex === CSRRegister.MEDELEG) {
+      medeleg := Cat(0.U(32.W), io.reg_write_data_ex)//delegate currently use low 32 bit
     }.elsewhen(io.reg_write_address_ex === CSRRegister.SATP) {
-    satp := io.reg_write_data_ex //mmu
+      satp := io.reg_write_data_ex //mmu
     }.elsewhen(io.reg_write_address_ex === CSRRegister.SSTATUS) {
-      sstatus := io.reg_write_data_ex
+      mstatus := (mstatus & ~SSTATUS_MASK) | (io.reg_write_data_ex & SSTATUS_MASK)
     }.elsewhen(io.reg_write_address_ex === CSRRegister.STVEC) {
       stvec := io.reg_write_data_ex
     }.elsewhen(io.reg_write_address_ex === CSRRegister.SSCRATCH) {

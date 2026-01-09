@@ -11,6 +11,7 @@ import riscv.core.CLINT
 import riscv.core.InstructionsEnv
 import riscv.core.InstructionsRet
 import riscv.core.InterruptStatus
+import riscv.core.PrivMode
 
 class CLINTTest extends AnyFlatSpec with ChiselScalatestTester {
   behavior.of("Core Local Interrupt Controller")
@@ -21,6 +22,7 @@ class CLINTTest extends AnyFlatSpec with ChiselScalatestTester {
     dut.io.csr_bundle.mtvec.poke(0x100.U)
     dut.io.csr_bundle.mepc.poke(0x200.U)
     dut.io.csr_bundle.mcause.poke(0.U)
+    dut.io.priv_mode.poke(3.U) // M-mode
   }
 
   it should "not assert interrupt when no interrupt flag" in {
@@ -159,6 +161,7 @@ class CLINTTest extends AnyFlatSpec with ChiselScalatestTester {
   it should "disable interrupts in mstatus when handling interrupt" in {
     test(new CLINT).withAnnotations(TestAnnotations.annos) { dut =>
       dut.io.csr_bundle.mstatus.poke(0x8.U) // MIE=1
+      dut.io.priv_mode.poke(3.U)  // M-mode
       dut.io.csr_bundle.mie.poke(0x80.U)
       dut.io.csr_bundle.mtvec.poke(0x100.U)
       dut.io.csr_bundle.mepc.poke(0.U)
@@ -190,4 +193,77 @@ class CLINTTest extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.csr_bundle.mcause_write_data.expect(11.U) // ECALL priority
     }
   }
+
+  // ---------- Delegation tests (medeleg) ----------
+
+  it should "S-mode ECALL should go to M-trap when not delegated (medeleg[9]=0)" in {
+    test(new CLINT).withAnnotations(TestAnnotations.annos) { dut =>
+      setupDefaultCSR(dut) // sets mtvec/mepc/mcause/mstatus/mie
+
+      // add S-mode CSR setup (CLINT needs these fields to be poked)
+      dut.io.csr_bundle.sstatus.poke(0.U)
+      dut.io.csr_bundle.stvec.poke(0x200.U)
+      dut.io.csr_bundle.sepc.poke(0.U)
+      dut.io.csr_bundle.scause.poke(0.U)
+      dut.io.csr_bundle.stval.poke(0.U)
+      dut.io.csr_bundle.sscratch.poke(0.U)
+
+      // IMPORTANT: current privilege = S
+      dut.io.priv_mode.poke(1.U) // PrivMode.S
+
+      // medeleg bit 9 = 0 => not delegated
+      // (assumes your CSRDirectAccessBundle has medeleg input)
+      dut.io.csr_bundle.medeleg.poke(0.U)
+
+      dut.io.interrupt_flag.poke(InterruptStatus.None)
+      dut.io.instruction_id.poke(InstructionsEnv.ecall)
+      dut.io.instruction_address_if.poke(0x1234.U)
+      dut.io.jump_flag.poke(false.B)
+      dut.io.jump_address.poke(0.U)
+
+      dut.clock.step()
+
+      // should take M trap
+      dut.io.id_interrupt_assert.expect(true.B)
+      dut.io.id_interrupt_handler_address.expect(0x100.U) // mtvec from setupDefaultCSR
+      dut.io.csr_bundle.direct_write_enable.expect(true.B)
+      dut.io.csr_bundle.mepc_write_data.expect(0x1234.U)
+      dut.io.csr_bundle.mcause_write_data.expect(9.U) // ECALL from S-mode => 9
+    }
+  }
+
+  it should "S-mode ECALL should go to S-trap when delegated (medeleg[9]=1)" in {
+    test(new CLINT).withAnnotations(TestAnnotations.annos) { dut =>
+      setupDefaultCSR(dut)
+
+      // S-mode CSR setup
+      dut.io.csr_bundle.sstatus.poke(0.U)
+      dut.io.csr_bundle.stvec.poke(0x200.U)
+      dut.io.csr_bundle.sepc.poke(0.U)
+      dut.io.csr_bundle.scause.poke(0.U)
+      dut.io.csr_bundle.stval.poke(0.U)
+      dut.io.csr_bundle.sscratch.poke(0.U)
+
+      dut.io.priv_mode.poke(1.U) // PrivMode.S
+
+      // medeleg bit 9 = 1 => delegate ECALL-from-S to S trap handler
+      dut.io.csr_bundle.medeleg.poke((BigInt(1) << 9).U)
+
+      dut.io.interrupt_flag.poke(InterruptStatus.None)
+      dut.io.instruction_id.poke(InstructionsEnv.ecall)
+      dut.io.instruction_address_if.poke(0x5678.U)
+      dut.io.jump_flag.poke(false.B)
+      dut.io.jump_address.poke(0.U)
+
+      dut.clock.step()
+
+      // should take S trap
+      dut.io.id_interrupt_assert.expect(true.B)
+      dut.io.id_interrupt_handler_address.expect(0x200.U) // stvec we set
+      dut.io.csr_bundle.direct_write_enable_s.expect(true.B)
+      dut.io.csr_bundle.sepc_write_data.expect(0x5678.U)
+      dut.io.csr_bundle.scause_write_data.expect(9.U) // ECALL from S-mode => 9
+    }
+  }
+
 }

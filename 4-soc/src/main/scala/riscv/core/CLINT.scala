@@ -110,101 +110,92 @@ class CLINT extends Module {
     io.csr_bundle.sstatus(0)            // keep bit 0
 
 
-  // ---- default assignments (avoid unconnected wires) ----
-  io.csr_bundle.sstatus_write_data := io.csr_bundle.sstatus
-  io.csr_bundle.sepc_write_data    := io.csr_bundle.sepc
-  io.csr_bundle.scause_write_data  := io.csr_bundle.scause
-  io.csr_bundle.stval_write_data   := io.csr_bundle.stval
+
+  // 1) classify events
+  val is_mret = (io.instruction_id === InstructionsRet.mret)
+  val is_sret = (io.instruction_id === InstructionsRet.sret)
+
+  val has_exc = (io.instruction_id === InstructionsEnv.ecall) || (io.instruction_id === InstructionsEnv.ebreak)
+  val excCause = MuxLookup(io.instruction_id, 0.U)(
+    IndexedSeq(
+      InstructionsEnv.ecall  -> Mux(cur_priv === PrivMode.M, 11.U, 9.U), // M/S ecall
+      InstructionsEnv.ebreak -> 3.U
+    )
+  )
+  // interrupts (optional; keep your existing gating)
+  val has_int = (io.interrupt_flag =/= InterruptStatus.None) && interrupt_enable_global && interrupt_source_enabled
+  val intCause = Mux(io.interrupt_flag(0), 0x80000007L.U, 0x8000000bL.U)
+
+  val take_trap = has_exc || has_int
+
+  val trap_is_exc = has_exc
+  val trap_cause  = Mux(trap_is_exc, excCause, intCause)
+
+  // 2) delegation decision (for now: only exceptions via medeleg)
+  val delegatedToS = (cur_priv =/= PrivMode.M) && trap_is_exc && io.csr_bundle.medeleg(trap_cause(5,0))  // low bits index ok for small causes
+
+  val targetIsS = delegatedToS
+  val targetIsM = take_trap && !targetIsS
+
+
+  // 3) defaults
+  io.id_interrupt_assert := false.B
+  io.id_interrupt_handler_address := 0.U
+
+  io.csr_bundle.direct_write_enable := false.B
   io.csr_bundle.direct_write_enable_s := false.B
   io.csr_bundle.priv_write_enable := false.B
-  io.csr_bundle.priv_write_data   := io.priv_mode   // 或者 PrivMode.M，都可
-  
+  io.csr_bundle.priv_write_data := cur_priv
 
-  // M-mode defaults
   io.csr_bundle.mstatus_write_data := io.csr_bundle.mstatus
   io.csr_bundle.mepc_write_data    := io.csr_bundle.mepc
   io.csr_bundle.mcause_write_data  := io.csr_bundle.mcause
   io.csr_bundle.mtval_write_data   := io.csr_bundle.mtval
-  io.csr_bundle.direct_write_enable := false.B
 
-  io.id_interrupt_assert := false.B
-  io.id_interrupt_handler_address := 0.U
+  io.csr_bundle.sstatus_write_data := io.csr_bundle.sstatus
+  io.csr_bundle.sepc_write_data    := io.csr_bundle.sepc
+  io.csr_bundle.scause_write_data  := io.csr_bundle.scause
+  io.csr_bundle.stval_write_data   := io.csr_bundle.stval
 
-
-
-  when (cur_priv === PrivMode.M){
-    when(io.instruction_id === InstructionsEnv.ecall || io.instruction_id === InstructionsEnv.ebreak) {
-      io.csr_bundle.mstatus_write_data := mstatus_disable_interrupt
-      io.csr_bundle.mepc_write_data    := instruction_address
-      io.csr_bundle.mcause_write_data := MuxLookup(
-        io.instruction_id,
-        10.U
-      )(
-        IndexedSeq(
-          InstructionsEnv.ecall  -> 11.U,
-          InstructionsEnv.ebreak -> 3.U,
-        )
-      )
-      io.csr_bundle.direct_write_enable := true.B
-      io.id_interrupt_assert            := true.B
-      io.id_interrupt_handler_address   := io.csr_bundle.mtvec
-      io.csr_bundle.mtval_write_data := 0.U
-    }.elsewhen(io.interrupt_flag =/= InterruptStatus.None && interrupt_enable_global && interrupt_source_enabled) {
-      io.csr_bundle.mstatus_write_data  := mstatus_disable_interrupt
-      io.csr_bundle.mepc_write_data     := instruction_address
-      io.csr_bundle.mcause_write_data   := Mux(io.interrupt_flag(0), 0x80000007L.U, 0x8000000bL.U)
-      io.csr_bundle.direct_write_enable := true.B
-      io.id_interrupt_assert            := true.B
-      io.id_interrupt_handler_address   := io.csr_bundle.mtvec
-      io.csr_bundle.mtval_write_data := 0.U
-    }.elsewhen(io.instruction_id === InstructionsRet.mret) {
-      io.csr_bundle.mstatus_write_data  := mstatus_recover_interrupt
-      io.csr_bundle.mepc_write_data     := io.csr_bundle.mepc
-      io.csr_bundle.mcause_write_data   := io.csr_bundle.mcause
-      io.csr_bundle.direct_write_enable := true.B
-      io.id_interrupt_assert            := true.B
-      io.id_interrupt_handler_address   := io.csr_bundle.mepc
-      io.csr_bundle.mtval_write_data := 0.U
-      // handle  priv
-      io.csr_bundle.priv_write_enable := true.B
-      io.csr_bundle.priv_write_data   := nextPriv
-    }.otherwise {
-      io.csr_bundle.mstatus_write_data  := io.csr_bundle.mstatus
-      io.csr_bundle.mepc_write_data     := io.csr_bundle.mepc
-      io.csr_bundle.mcause_write_data   := io.csr_bundle.mcause
-      io.csr_bundle.direct_write_enable := false.B
-      io.id_interrupt_assert            := false.B
-      io.id_interrupt_handler_address   := 0.U
-    }
-  }
-  .elsewhen (cur_priv === PrivMode.S){
-    when(io.instruction_id === InstructionsEnv.ecall || io.instruction_id === InstructionsEnv.ebreak) {
-      io.csr_bundle.sstatus_write_data := sstatus_disable_interrupt
-      io.csr_bundle.sepc_write_data    := instruction_address
-      io.csr_bundle.scause_write_data := MuxLookup(
-        io.instruction_id,
-        9.U
-      )(
-        IndexedSeq(
-          InstructionsEnv.ecall  -> 9.U,
-          InstructionsEnv.ebreak -> 3.U,
-        )
-      )
-      io.csr_bundle.direct_write_enable_s := true.B
-      io.id_interrupt_assert            := true.B
-      io.id_interrupt_handler_address   := io.csr_bundle.stvec
-      io.csr_bundle.stval_write_data := 0.U
-
-    }.elsewhen(io.instruction_id === InstructionsRet.sret) {
+  // 4) return path
+  when (is_mret) {
+    io.csr_bundle.mstatus_write_data := mstatus_recover_interrupt
+    io.csr_bundle.direct_write_enable := true.B
+    io.id_interrupt_assert := true.B
+    io.id_interrupt_handler_address := io.csr_bundle.mepc
+    io.csr_bundle.priv_write_enable := true.B
+    io.csr_bundle.priv_write_data := nextPriv
+  } .elsewhen (is_sret) {
     io.csr_bundle.sstatus_write_data := sstatus_recover_interrupt
     io.csr_bundle.direct_write_enable_s := true.B
     io.id_interrupt_assert := true.B
     io.id_interrupt_handler_address := io.csr_bundle.sepc
     io.csr_bundle.priv_write_enable := true.B
-    io.csr_bundle.priv_write_data   := PrivMode.S  
-  }
+    io.csr_bundle.priv_write_data := PrivMode.S  
+  } .elsewhen (take_trap) {
+    when (targetIsM) {
+      io.csr_bundle.mstatus_write_data := mstatus_disable_interrupt
+      io.csr_bundle.mepc_write_data    := instruction_address
+      io.csr_bundle.mcause_write_data  := trap_cause
+      io.csr_bundle.mtval_write_data   := 0.U
+      io.csr_bundle.direct_write_enable := true.B
 
-  }.otherwise{
+      io.id_interrupt_assert := true.B
+      io.id_interrupt_handler_address := io.csr_bundle.mtvec
 
+      io.csr_bundle.priv_write_enable := true.B
+      io.csr_bundle.priv_write_data := PrivMode.M
+    } .otherwise { // targetIsS
+      io.csr_bundle.sstatus_write_data := sstatus_disable_interrupt
+      io.csr_bundle.sepc_write_data    := instruction_address
+      io.csr_bundle.scause_write_data  := trap_cause
+      io.csr_bundle.stval_write_data   := 0.U
+      io.csr_bundle.direct_write_enable_s := true.B
+      io.id_interrupt_assert := true.B
+      io.id_interrupt_handler_address := io.csr_bundle.stvec
+
+      io.csr_bundle.priv_write_enable := true.B
+      io.csr_bundle.priv_write_data := PrivMode.S
+    }
   }
 }
