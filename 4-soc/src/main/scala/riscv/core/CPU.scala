@@ -21,6 +21,8 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
       cpu.io.instruction       := io.instruction
       cpu.io.instruction_valid := io.instruction_valid
 
+      io.instruction_address := cpu.io.instruction_address
+
       // Connect memory/bus interface through AXI4-Lite master
       val axi_master = Module(new AXI4LiteMaster(Parameters.AddrBits, Parameters.DataBits))
 
@@ -29,29 +31,10 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
         .address(Parameters.AddrBits - Parameters.SlaveDeviceCountBits - 1, 0)
 
 
-      // mmu
-      val mmu = Module(new MMU)
-      mmu.io.enable := true.B
-      mmu.io.satp := cpu.io.satp_out
-      io.satp_out := cpu.io.satp_out
 
-      /* -------- I-side tie-off-------- */
-      mmu.io.i_va    := cpu.io.instruction_address
-      mmu.io.i_valid := io.instruction_valid
-      io.instruction_address :=mmu.io.i_pa
-    
-
-      /* -------- D-side: translate bus address -------- */
-
-      mmu.io.d_va      := full_bus_address
-      mmu.io.d_valid   := cpu.io.memory_bundle.request && (cpu.io.memory_bundle.read || cpu.io.memory_bundle.write)
-      mmu.io.d_isLoad  := cpu.io.memory_bundle.request && cpu.io.memory_bundle.read
-      mmu.io.d_isStore := cpu.io.memory_bundle.request && cpu.io.memory_bundle.write
-
-      val pa = mmu.io.d_pa
 
       // BusBundle to AXI4LiteMasterBundle adapter
-      axi_master.io.bundle.address      :=  pa
+      axi_master.io.bundle.address      := full_bus_address
       axi_master.io.bundle.read         := cpu.io.memory_bundle.request && cpu.io.memory_bundle.read
       axi_master.io.bundle.write        := cpu.io.memory_bundle.request && cpu.io.memory_bundle.write
       axi_master.io.bundle.write_data   := cpu.io.memory_bundle.write_data
@@ -88,7 +71,7 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
       // wrong slave. By registering bus_address when a new request starts and
       // holding it while the master is busy, we ensure stable routing.
       val bus_address_reg  = RegInit(0.U(Parameters.AddrWidth))
-      val next_bus_address = pa
+      val next_bus_address = full_bus_address
 
       // New transaction starts when master is idle (not busy) and CPU issues a
       // read or write request on the BusBundle.
@@ -99,7 +82,7 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
 
       when(start_bus_transaction) {
         bus_address_reg := next_bus_address
-        //printf(p"[MMU] VA=0x${Hexadecimal(full_bus_address)} PA=0x${Hexadecimal(pa)}\n")
+
       }
 
       io.bus_address := bus_address_reg

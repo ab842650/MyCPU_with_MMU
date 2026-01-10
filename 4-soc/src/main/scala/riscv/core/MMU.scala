@@ -68,13 +68,16 @@ class MMU extends Module {
   io.i_fault := false.B
   io.d_fault := false.B
 
+  // in MMU.scala test
+  val PF_VA = "h00002000".U(Parameters.AddrWidth)
+
   /* =============================
    * Debug
    * ============================= */
-  when(io.enable && io.i_valid) {
-    //printf(p"[I-MMU] VA=0x${Hexadecimal(io.i_va)} PA=0x${Hexadecimal(io.i_pa)}\n")
+  when(io.enable && io.i_valid && (io.i_va === PF_VA)) {
+    io.i_fault := true.B
   }
-  when(io.enable && io.d_valid) {
+  when(satp_mode && io.d_valid) {
     //printf(p"[D-MMU] VA=0x${Hexadecimal(io.d_va)} PA=0x${Hexadecimal(io.d_pa)}\n")
   }
 }

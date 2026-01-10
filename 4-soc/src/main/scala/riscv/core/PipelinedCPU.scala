@@ -129,6 +129,7 @@ class PipelinedCPU extends Module {
   val forwarding = Module(new Forwarding)
   val clint      = Module(new CLINT)
   val csr_regs   = Module(new CSR)
+  val mmu        = Module(new MMU)
 
   ctrl.io.jump_flag               := id.io.if_jump_flag
   ctrl.io.jump_instruction_id     := id.io.ctrl_jump_instruction
@@ -179,6 +180,25 @@ class PipelinedCPU extends Module {
   val actual_taken      = id.io.if_jump_flag
   val actual_target     = id.io.if_jump_address
   val is_branch_or_jump = id.io.ctrl_jump_instruction
+
+
+  //mmu
+  mmu.io.satp   := csr_regs.io.satp_out
+  mmu.io.enable := (csr_regs.io.satp_out(31) === 1.U)
+  // I-side: VA from IF stage
+  mmu.io.i_va    := inst_fetch.io.if_fault_va   // == current PC (VA)
+  mmu.io.i_valid := io.instruction_valid && !inst_fetch.io.stall_flag_ctrl
+
+  // feed MMU result back to IF
+  inst_fetch.io.mmu_i_pa    := mmu.io.i_pa
+  inst_fetch.io.mmu_i_fault := mmu.io.i_fault
+  inst_fetch.io.mmu_i_stall := mmu.io.i_stall 
+
+  // D-side tie-off (until you really hook data MMU)
+  mmu.io.d_va      := 0.U
+  mmu.io.d_valid   := false.B
+  mmu.io.d_isLoad  := false.B
+  mmu.io.d_isStore := false.B
 
   // BTB misprediction detection - covers multiple cases:
   // 1. BTB predicted taken, but branch not taken (wrong direction)
@@ -369,6 +389,9 @@ class PipelinedCPU extends Module {
   if2id.io.ibtb_predicted_valid  := inst_fetch.io.ibtb_predicted_valid
   if2id.io.ibtb_predicted_target := inst_fetch.io.ibtb_predicted_target
 
+  if2id.io.if_page_fault := inst_fetch.io.if_page_fault
+  if2id.io.if_fault_va    := inst_fetch.io.if_fault_va
+
   id.io.instruction               := if2id.io.output_instruction
   id.io.instruction_address       := if2id.io.output_instruction_address
   id.io.reg1_data                 := regs.io.read_data1
@@ -488,6 +511,9 @@ class PipelinedCPU extends Module {
   clint.io.csr_bundle <> csr_regs.io.clint_access_bundle
   clint.io.priv_mode := csr_regs.io.priv_mode_out //priv mode
 
+  clint.io.if_page_fault := if2id.io.output_if_page_fault //i side page fault
+  clint.io.if_fault_va   := if2id.io.output_if_fault_va
+
   csr_regs.io.reg_read_address_id    := id.io.ex_csr_address
   csr_regs.io.reg_write_enable_ex    := id2ex.io.output_csr_write_enable
   csr_regs.io.reg_write_address_ex   := id2ex.io.output_csr_address
@@ -495,8 +521,7 @@ class PipelinedCPU extends Module {
   csr_regs.io.debug_reg_read_address := io.csr_debug_read_address
   io.csr_debug_read_data             := csr_regs.io.debug_reg_read_data
 
-  //satp
-  io.satp_out := csr_regs.io.satp_out
+
 
  
 

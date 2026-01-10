@@ -112,6 +112,15 @@ class InstructionFetch extends Module {
     val ibtb_update_pc       = Input(UInt(Parameters.AddrWidth))
     val ibtb_update_rs1_hash = Input(UInt(8.W))
     val ibtb_update_target   = Input(UInt(Parameters.AddrWidth))
+    // from MMU (I-side)
+    val mmu_i_pa    = Input(UInt(Parameters.AddrWidth))
+    val mmu_i_stall = Input(Bool())
+    val mmu_i_fault = Input(Bool())
+
+    // to control / ID (for trap)
+    val if_page_fault = Output(Bool())
+    val if_fault_va   = Output(UInt(Parameters.AddrWidth)) // for stval/mtval 
+
   })
   val pc = RegInit(ProgramCounter.EntryAddress)
 
@@ -216,6 +225,8 @@ class InstructionFetch extends Module {
     )
   )
 
+  io.if_fault_va   := pc // if fault
+
   // Next PC selection priority:
   // 1. Pending jump (deferred from stall)
   // 2. BTB misprediction correction (rollback to sequential PC)
@@ -229,14 +240,18 @@ class InstructionFetch extends Module {
       take_pending                                  -> pending_jump_addr,
       take_btb_correction                           -> io.btb_correction_addr,
       take_current                                  -> io.jump_address_id,
-      (io.stall_flag_ctrl || !io.instruction_valid) -> pc
+      (io.stall_flag_ctrl || !io.instruction_valid || io.mmu_i_stall || io.mmu_i_fault) -> pc
     )
   )
 
+  io.if_page_fault := io.mmu_i_fault && !io.mmu_i_stall && io.instruction_valid
+
+
   pc := next_pc
 
-  io.instruction_address := pc
-  io.id_instruction      := Mux(io.instruction_valid, io.rom_instruction, InstructionsNop.nop)
+  io.instruction_address :=  io.mmu_i_pa
+  io.id_instruction      := Mux(io.if_page_fault, InstructionsNop.nop,
+                           Mux(io.instruction_valid, io.rom_instruction, InstructionsNop.nop))
 
   // BTB update interface - connect external update signals to BTB
   btb.io.update_valid  := io.btb_update_valid

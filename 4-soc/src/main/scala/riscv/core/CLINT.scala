@@ -31,11 +31,21 @@ class CLINT extends Module {
 
     val priv_mode = Input(UInt(2.W)) //current mode
 
+    // from IF/MMU
+    val if_page_fault = Input(Bool())
+    val if_fault_va   = Input(UInt(Parameters.AddrWidth))
+
+
     val csr_bundle = new CSRDirectAccessBundle
   })
   val interrupt_enable_global   = io.csr_bundle.mstatus(3) // MIE bit (global enable)
   val interrupt_enable_timer    = io.csr_bundle.mie(7)     // MTIE bit (timer enable)
   val interrupt_enable_external = io.csr_bundle.mie(11)    // MEIE bit (external enable)
+
+
+      //page fault
+  val is_if_page_fault = io.if_page_fault
+  val if_pf_cause     = 12.U  // Instruction page fault
 
   //val cur_priv = Mux(io.priv_mode === 0.U, PrivMode.M, io.priv_mode) // for testing
 
@@ -115,11 +125,15 @@ class CLINT extends Module {
   val is_mret = (io.instruction_id === InstructionsRet.mret)
   val is_sret = (io.instruction_id === InstructionsRet.sret)
 
-  val has_exc = (io.instruction_id === InstructionsEnv.ecall) || (io.instruction_id === InstructionsEnv.ebreak)
-  val excCause = MuxLookup(io.instruction_id, 0.U)(
-    IndexedSeq(
-      InstructionsEnv.ecall  -> Mux(cur_priv === PrivMode.M, 11.U, 9.U), // M/S ecall
-      InstructionsEnv.ebreak -> 3.U
+  val has_exc = (io.instruction_id === InstructionsEnv.ecall) || (io.instruction_id === InstructionsEnv.ebreak || is_if_page_fault)
+  val excCause = Mux(
+    is_if_page_fault,
+    if_pf_cause,
+    MuxLookup(io.instruction_id, 0.U)(
+      IndexedSeq(
+        InstructionsEnv.ecall  -> Mux(cur_priv === PrivMode.M, 11.U, 9.U),
+        InstructionsEnv.ebreak -> 3.U
+      )
     )
   )
   // interrupts (optional; keep your existing gating)
@@ -189,7 +203,7 @@ class CLINT extends Module {
       io.csr_bundle.sstatus_write_data := sstatus_disable_interrupt
       io.csr_bundle.sepc_write_data    := instruction_address
       io.csr_bundle.scause_write_data  := trap_cause
-      io.csr_bundle.stval_write_data   := 0.U
+      io.csr_bundle.stval_write_data := Mux(is_if_page_fault, io.if_fault_va, 0.U)
       io.csr_bundle.direct_write_enable_s := true.B
       io.id_interrupt_assert := true.B
       io.id_interrupt_handler_address := io.csr_bundle.stvec

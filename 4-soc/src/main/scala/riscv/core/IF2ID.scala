@@ -36,6 +36,13 @@ class IF2ID extends Module {
     val ibtb_predicted_valid  = Input(Bool())                     // IndirectBTB prediction valid from IF
     val ibtb_predicted_target = Input(UInt(Parameters.AddrWidth)) // IndirectBTB predicted target
 
+    //mmu page fault
+    val if_page_fault = Input(Bool())
+    val if_fault_va   = Input(UInt(Parameters.AddrWidth))
+
+    val output_if_page_fault = Output(Bool())
+    val output_if_fault_va   = Output(UInt(Parameters.AddrWidth))
+
     val output_instruction           = Output(UInt(Parameters.DataWidth))
     val output_instruction_address   = Output(UInt(Parameters.AddrWidth))
     val output_interrupt_flag        = Output(UInt(Parameters.InterruptFlagWidth))
@@ -103,4 +110,17 @@ class IF2ID extends Module {
   ibtb_predicted_target.io.stall  := io.stall
   ibtb_predicted_target.io.flush  := io.flush
   io.output_ibtb_predicted_target := ibtb_predicted_target.io.out
+
+  // IF page fault passed through pipeline
+  val if_page_fault = Module(new PipelineRegister(1))
+  if_page_fault.io.in    := io.if_page_fault
+  if_page_fault.io.stall := io.stall
+  if_page_fault.io.flush := io.flush
+  io.output_if_page_fault := if_page_fault.io.out.asBool
+
+  val if_fault_va = Module(new PipelineRegister(Parameters.AddrBits))
+  if_fault_va.io.in    := io.if_fault_va
+  if_fault_va.io.stall := io.stall
+  if_fault_va.io.flush := io.flush
+  io.output_if_fault_va := if_fault_va.io.out
 }

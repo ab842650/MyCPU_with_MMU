@@ -25,8 +25,6 @@ class CPUBundle extends Bundle {
   // Interrupt
   val interrupt_flag = Input(UInt(Parameters.InterruptFlagWidth))
 
-  //mmu
-  val satp_out = Output(UInt(Parameters.DataWidth))
 
   // Debug interfaces
   val debug_read_address = Input(UInt(Parameters.PhysicalRegisterAddrWidth))
