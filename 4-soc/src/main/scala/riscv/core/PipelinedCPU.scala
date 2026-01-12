@@ -199,12 +199,7 @@ class PipelinedCPU extends Module {
   mmu.io.d_valid   := false.B
   mmu.io.d_isLoad  := false.B
   mmu.io.d_isStore := false.B
-  //PTW
-  mem.io.ptw_req_valid := mmu.io.ptw_req_valid
-  mem.io.ptw_req_addr  := mmu.io.ptw_req_addr
 
-  mmu.io.ptw_resp_valid := mem.io.ptw_resp_valid
-  mmu.io.ptw_resp_data  := mem.io.ptw_resp_data
 
   // BTB misprediction detection - covers multiple cases:
   // 1. BTB predicted taken, but branch not taken (wrong direction)

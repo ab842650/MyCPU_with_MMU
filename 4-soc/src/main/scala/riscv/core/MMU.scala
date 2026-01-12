@@ -29,16 +29,11 @@ class MMU extends Module {
     val enable = Input(Bool()) // satp.mode != 0
     val satp = Input(UInt(Parameters.DataWidth))
 
-    /* ========= PTW mem read port ========= */
-    val ptw_req_valid  = Output(Bool())
-    val ptw_req_addr   = Output(UInt(Parameters.AddrWidth)) // PA
-    val ptw_resp_valid = Input(Bool())
-    val ptw_resp_data  = Input(UInt(32.W))                  // PTE32
+
   })
 
     // default
-    io.ptw_req_valid := false.B
-    io.ptw_req_addr  := 0.U
+
 
     // =============================
     // satp decode (Sv32-ready)
@@ -89,17 +84,13 @@ class MMU extends Module {
 
     is(sL1Req) {
       io.i_stall := true.B
-      io.ptw_req_valid := true.B
-      io.ptw_req_addr  := pte1_addr
+
       state := sL1Wait
     }
 
     is(sL1Wait) {
       io.i_stall := true.B
-      when(io.ptw_resp_valid) {
-        pte1 := io.ptw_resp_data
-        state := sDone
-      }
+
     }
 
     is(sDone) {

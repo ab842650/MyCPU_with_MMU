@@ -1,120 +1,166 @@
-    .section .text
-    .globl main
-    .option norvc
+.section .text
+.globl main
 
 main:
-    # =========================
-    # M-mode init
-    # =========================
-    li      t0, 0x4D300001
-    csrw    mscratch, t0
+  # marker: M-mode start
+  li  t0, 0x11112222
+  csrw mscratch, t0
 
-    # (1) set mtvec -> m_trap
-    la      t0, m_trap
-    csrw    mtvec, t0
+  # mtvec (optional)
+  la  t0, m_trap
+  csrw mtvec, t0
 
-    # (2) delegate instruction page fault (cause=12) to S-mode
-    #     medeleg[12] = 1
-    li      t0, (1 << 12)
-    csrw    medeleg, t0
+  # -------------------------
+  # Build Sv32 L1 page table at PA 0x00005000
+  # -------------------------
+  li  t0, 0x00005000      # L1 base (must be 4KB aligned)
 
-    li      t0, 0x4D300002
-    csrw    mscratch, t0
+  # flags: V|R|W|X|A|D = 0xCF
+  li  t1, 0x000000CF
 
-    # (3) enter S-mode via mret: set MPP = S, mepc = s_main
-    csrr    t1, mstatus
-    li      t0, ~(3 << 11)      # clear MPP[12:11]
-    and     t1, t1, t0
-    li      t0, (1 << 11)       # MPP = 01 (S)
-    or      t1, t1, t0
-    csrw    mstatus, t1
+  # entry 0: VPN1=0 superpage identity (ppn1=0)
+  sw  t1, 0(t0)
 
-    la      t0, s_main
-    csrw    mepc, t0
+  # entry 1: VPN1=1 superpage identity for 0x00400000 region
+  # superpage needs ppn0 = 0, ppn1 = 1
+  li  t2, (1 << 20)       # ppn1=1 goes into PTE[31:20]
+  or  t2, t2, t1
+  sw  t2, 4(t0)
 
-    li      t0, 0x4D300003
-    csrw    mscratch, t0
-
-    li      t0, 0x80000000       # bit31=1
-    csrw    satp, t0
-
-    mret
+  # (optional) clear a few more entries just to be safe
+  sw  zero, 8(t0)
+  sw  zero, 12(t0)
 
 
-# =========================
-# M-mode trap handler
-# 觀察點：如果「沒被 delegated」，page fault 會跳到這裡
-# =========================
-    .align 4
+  # -------------------------
+  # Enter S-mode
+  # -------------------------
+  csrr t1, mstatus
+  li   t0, ~(3 << 11)      # clear MPP
+  and  t1, t1, t0
+  li   t0, (1 << 11)       # MPP = S
+  or   t1, t1, t0
+  csrw mstatus, t1
+
+  la  t0, s_main
+  csrw mepc, t0
+  mret
+
+# -------------------------
+# M-mode trap (should not happen for now)
+# -------------------------
+.align 4
 m_trap:
-    li      t0, 0x4D300F01
-    csrw    mscratch, t0
+  li  t0, 0xDEAD0001
+  csrw mscratch, t0
+  j   m_trap
 
-    # 讀 mcause 看是不是 12
-    csrr    t2, mcause
-    csrw    mscratch, t2      # 或者存到你方便看的地方
-
-    # skip faulting instr to avoid infinite trap (best-effort)
-    csrr    t1, mepc
-    addi    t1, t1, 4
-    csrw    mepc, t1
-
-    li      t0, 0x4D30F002
-    csrw    mscratch, t0
-    mret
-
-
-# =========================
-# S-mode trap handler
-# 觀察點：page fault delegated 會跳到這裡
-# =========================
-    .align 4
-s_trap:
-    li      t0, 0x53300F01
-    csrw    sscratch, t0
-
-    # 讀 scause 應該是 12
-    csrr    t2, scause
-    csrw    sscratch, t2
-
-    # 讀 stval 應該是 fault VA (=0x2000)
-    csrr    t3, stval
-    csrw    sscratch, t3
-
-    # skip faulting instruction so we don't trap forever
-    csrr    t1, sepc
-    addi    t1, t1, 4
-    csrw    sepc, t1
-
-    li      t0, 0x53300F02
-    csrw    sscratch, t0
-    sret
-
-
-# =========================
+# =====================================================
 # S-mode main
-# =========================
-    .align 4
+# =====================================================
+.align 4
 s_main:
-    # marker: we're in S main
-    li      t0, 0x53300001
-    csrw    sscratch, t0
+  # marker: entered S-mode
+  li  t0, 0x33334444
+  csrw sscratch, t0
 
-    # set stvec -> s_trap
-    la      t0, s_trap
-    csrw    stvec, t0
+  # set stack (in mapped region: VPN1=1 covers 0x00400000)
+  li  sp, 0x00400000
 
-    li      t0, 0x53300002
-    csrw    sscratch, t0
+  # -------------------------
+  # Enable paging: satp = Sv32 | PPN(0x5000>>12 = 0x5)
+  # -------------------------
+  li  t0, 0x80000005
+  csrw satp, t0
 
-    # ---- trigger instruction page fault ----
-    # Jump to VA 0x00002000 (MMU will fault only for this fetch)
-    li      t0, 0x00002000
-    jr      t0
+  lw  t3, 0(t0)      # 讀回 entry0
+  csrw mscratch, t3  # 你波形可觀察
 
-after_pf:
-    li      t0, 0x53300003
-    csrw    sscratch, t0
+  lw  t4, 4(t0)      # 讀回 entry1
+  csrw mscratch, t4
+
+  # marker: paging enabled
+  nop
+  nop
+  nop
+
+  # -------------------------------------------------
+  # Your load/store stress test (unchanged logic)
+  # -------------------------------------------------
+  li  t6, 0              # accumulator
+
+  li  t2, 0xAABBCCDD
+  sw  t2, 0(sp)
+  xor t6, t6, t2
+
+  li  t2, 0x11223344
+  sw  t2, 4(sp)
+  add t6, t6, t2
+
+  li  t2, 0x55667788
+  sw  t2, 8(sp)
+  xor t6, t6, t2
+
+  li  t2, 0xDEADBEEF
+  sw  t2, 12(sp)
+  add t6, t6, t2
+
+  li  t2, 0x0F0F0F0F
+  sw  t2, 16(sp)
+  xor t6, t6, t2
+
+  li  t2, 0x13579BDF
+  sw  t2, 20(sp)
+  add t6, t6, t2
+
+  li  t2, 0x2468ACE0
+  sw  t2, 24(sp)
+  xor t6, t6, t2
+
+  li  t2, 0xCAFEBABE
+  sw  t2, 28(sp)
+  add t6, t6, t2
+
+  li  t0, 0x55556666
+  csrw sscratch, t0
+
+  lw  t3, 0(sp)
+  lw  t4, 4(sp)
+  xor t6, t6, t3
+  add t6, t6, t4
+
+  lw  t3, 8(sp)
+  lw  t4, 12(sp)
+  xor t6, t6, t3
+  add t6, t6, t4
+
+  lw  t3, 16(sp)
+  lw  t4, 20(sp)
+  xor t6, t6, t3
+  add t6, t6, t4
+
+  lw  t3, 24(sp)
+  lw  t4, 28(sp)
+  xor t6, t6, t3
+  add t6, t6, t4
+
+  li  t0, 0x66667777
+  csrw sscratch, t0
+
+  li  t5, 16
+loop_rmw:
+  lw  t2, 0(sp)
+  add t2, t2, t6
+  sw  t2, 0(sp)
+  lw  t3, 0(sp)
+  xor t6, t6, t3
+
+  addi sp, sp, 4
+  addi t5, t5, -1
+  bnez t5, loop_rmw
+
+  # publish checksum
+  csrw sscratch, t6
 
 done:
-    j       done
+  j done
