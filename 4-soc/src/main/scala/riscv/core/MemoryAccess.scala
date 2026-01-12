@@ -10,7 +10,7 @@ import riscv.core.BusBundle
 import riscv.Parameters
 
 object MemoryAccessStates extends ChiselEnum {
-  val Idle, Read, Write = Value
+  val Idle, Read, Write, PtwRead = Value
 }
 
 /**
@@ -62,6 +62,14 @@ class MemoryAccess extends Module {
     val wb_regs_write_address = Output(UInt(Parameters.PhysicalRegisterAddrWidth))
     val wb_regs_write_enable  = Output(Bool())
 
+    // from MMU (PTW request)
+    val ptw_req_valid = Input(Bool())
+    val ptw_req_addr  = Input(UInt(Parameters.AddrWidth)) // PA
+
+    // to MMU (PTW response)
+    val ptw_resp_valid = Output(Bool())
+    val ptw_resp_data  = Output(UInt(32.W))               // PTE32
+
     val bus = new BusBundle
   })
   val mem_address_index = io.alu_result(log2Up(Parameters.WordSize) - 1, 0).asUInt
@@ -88,6 +96,13 @@ class MemoryAccess extends Module {
   // Without this, forward_to_ex would show the wrong value (ALU result instead of
   // loaded data) because effective_regs_write_source switches too early.
   val read_just_completed = RegInit(false.B)
+
+  // latch PTW request address
+  val lateched_ptw_address= RegInit(0.U(Parameters.AddrWidth))
+
+  //default
+  io.ptw_resp_valid := false.B
+  io.ptw_resp_data  := 0.U
 
   // Helper for common transaction completion logic (state machine reset only)
   def on_bus_transaction_finished() = {
@@ -210,7 +225,24 @@ class MemoryAccess extends Module {
     }
   }.otherwise {
     // Idle state: check enable signals to start new transactions
-    when(io.memory_read_enable) {
+    // make ptw read the highest priority
+    when(io.ptw_req_valid) {
+      //  latch addr
+      lateched_ptw_address :=
+        io.ptw_req_addr(
+          Parameters.AddrBits - 1,
+          log2Up(Parameters.WordSize)
+        ) ## 0.U(log2Up(Parameters.WordSize).W)
+      // sent read request to bus
+      io.ctrl_stall_flag := true.B
+      io.bus.request := true.B
+      io.bus.read := true.B
+      io.bus.address := lateched_ptw_address
+
+      when(io.bus.granted) {
+        mem_access_state := MemoryAccessStates.PtwRead
+      }
+    }.elsewhen(io.memory_read_enable) {
       // Start the read transaction when the bus is available
       io.ctrl_stall_flag := true.B
       io.bus.read        := true.B

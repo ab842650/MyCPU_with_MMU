@@ -38,7 +38,7 @@ class IF2ID extends Module {
 
     //mmu page fault
     val if_page_fault = Input(Bool())
-    val if_fault_va   = Input(UInt(Parameters.AddrWidth))
+    val pc_va   = Input(UInt(Parameters.AddrWidth))
 
     val output_if_page_fault = Output(Bool())
     val output_if_fault_va   = Output(UInt(Parameters.AddrWidth))
@@ -119,7 +119,7 @@ class IF2ID extends Module {
   io.output_if_page_fault := if_page_fault.io.out.asBool
 
   val if_fault_va = Module(new PipelineRegister(Parameters.AddrBits))
-  if_fault_va.io.in    := io.if_fault_va
+  if_fault_va.io.in    := io.pc_va
   if_fault_va.io.stall := io.stall
   if_fault_va.io.flush := io.flush
   io.output_if_fault_va := if_fault_va.io.out

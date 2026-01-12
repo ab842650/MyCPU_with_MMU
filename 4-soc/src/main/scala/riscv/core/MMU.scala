@@ -2,6 +2,7 @@
 package riscv.core
 
 import chisel3._
+import chisel3.util._
 import riscv.Parameters
 
 class MMU extends Module {
@@ -27,12 +28,17 @@ class MMU extends Module {
     /* ========= Control ========= */
     val enable = Input(Bool()) // satp.mode != 0
     val satp = Input(UInt(Parameters.DataWidth))
+
+    /* ========= PTW mem read port ========= */
+    val ptw_req_valid  = Output(Bool())
+    val ptw_req_addr   = Output(UInt(Parameters.AddrWidth)) // PA
+    val ptw_resp_valid = Input(Bool())
+    val ptw_resp_data  = Input(UInt(32.W))                  // PTE32
   })
-    // =============================
-    // Page Table Walker (skeleton)
-    // =============================
 
-
+    // default
+    io.ptw_req_valid := false.B
+    io.ptw_req_addr  := 0.U
 
     // =============================
     // satp decode (Sv32-ready)
@@ -43,41 +49,64 @@ class MMU extends Module {
 
 
 
-    // =============================
-    // Translation backend (toy for now)
-    // =============================
-    val i_pa_translated = Wire(UInt(Parameters.AddrWidth))
-    val d_pa_translated = Wire(UInt(Parameters.AddrWidth))
+    //PTW state
+    val sIdle :: sL1Req :: sL1Wait :: sDone :: Nil = Enum(4)
+    val state = RegInit(sIdle)
 
-    // default: pass-through
-    i_pa_translated := io.i_va
-    d_pa_translated := io.d_va
+    val latched_va  = Reg(UInt(Parameters.AddrWidth))
+    val pte1        = Reg(UInt(32.W))
+    
 
-    //when(io.enable) {
-    // toy translation (will be replaced by PTW)
-    //i_pa_translated := io.i_va + 0x100.U
-    //d_pa_translated := io.d_va + 0x100.U
-    //}
+    // VA split
+    val vpn1 = latched_va(31, 22)
+    val vpn0 = latched_va(21, 12)
+    val off  = latched_va(11, 0)
 
-    io.i_pa := i_pa_translated
-    io.d_pa := d_pa_translated
+    // defaults
+    io.i_pa    := io.i_va
+    io.d_pa    := io.d_va
+    io.i_stall := false.B
+    io.d_stall := false.B
+    io.i_fault := false.B
+    io.d_fault := false.B
 
-  // For now: PTW not implemented, never stall or fault
-  io.i_stall := false.B
-  io.d_stall := false.B
-  io.i_fault := false.B
-  io.d_fault := false.B
+    // io.ptw_req_valid := false.B
+    // io.ptw_req_addr  := 0.U
 
-  // in MMU.scala test
-  val PF_VA = "h00002000".U(Parameters.AddrWidth)
+    // L1 PTE addr = root_base + vpn1*4
 
-  /* =============================
-   * Debug
-   * ============================= */
-  when(io.enable && io.i_valid && (io.i_va === PF_VA)) {
-    io.i_fault := true.B
+    val root_base = satp_ppn << 12
+    val pte1_addr = root_base + (vpn1 << 2)
+
+    //FSM
+    switch(state) {
+    is(sIdle) {
+      when(io.enable && satp_mode === 1.U && io.i_valid) {
+        latched_va := io.i_va
+        state := sL1Req
+      }
+    }
+
+    is(sL1Req) {
+      io.i_stall := true.B
+      io.ptw_req_valid := true.B
+      io.ptw_req_addr  := pte1_addr
+      state := sL1Wait
+    }
+
+    is(sL1Wait) {
+      io.i_stall := true.B
+      when(io.ptw_resp_valid) {
+        pte1 := io.ptw_resp_data
+        state := sDone
+      }
+    }
+
+    is(sDone) {
+      // 先不翻譯、不 fault，讓它先放行
+      io.i_stall := false.B
+      state := sIdle
+    }
   }
-  when(satp_mode && io.d_valid) {
-    //printf(p"[D-MMU] VA=0x${Hexadecimal(io.d_va)} PA=0x${Hexadecimal(io.d_pa)}\n")
-  }
+
 }

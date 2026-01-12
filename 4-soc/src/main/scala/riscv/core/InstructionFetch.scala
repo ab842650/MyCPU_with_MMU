@@ -119,7 +119,7 @@ class InstructionFetch extends Module {
 
     // to control / ID (for trap)
     val if_page_fault = Output(Bool())
-    val if_fault_va   = Output(UInt(Parameters.AddrWidth)) // for stval/mtval 
+    val pc_va   = Output(UInt(Parameters.AddrWidth)) // for stval/mtval 
 
   })
   val pc = RegInit(ProgramCounter.EntryAddress)
@@ -225,7 +225,7 @@ class InstructionFetch extends Module {
     )
   )
 
-  io.if_fault_va   := pc // if fault
+  io.pc_va   := pc // if fault
 
   // Next PC selection priority:
   // 1. Pending jump (deferred from stall)
