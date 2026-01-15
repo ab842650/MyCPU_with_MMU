@@ -31,12 +31,16 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
         .address(Parameters.AddrBits - Parameters.SlaveDeviceCountBits - 1, 0)
 
 
+      val mem_read  = cpu.io.memory_bundle.request && cpu.io.memory_bundle.read
+      val mem_write = cpu.io.memory_bundle.request && cpu.io.memory_bundle.write
+
+      val bus_owner_is_ptw = cpu.ptw.ptw_active
 
 
       // BusBundle to AXI4LiteMasterBundle adapter
-      axi_master.io.bundle.address      := full_bus_address
-      axi_master.io.bundle.read         := cpu.io.memory_bundle.request && cpu.io.memory_bundle.read
-      axi_master.io.bundle.write        := cpu.io.memory_bundle.request && cpu.io.memory_bundle.write
+      axi_master.io.bundle.address := Mux(bus_owner_is_ptw, cpu.ptw.ptw_req_addr, full_bus_address)
+      axi_master.io.bundle.read    := Mux(bus_owner_is_ptw, cpu.ptw.ptw_req_valid, mem_read)
+      axi_master.io.bundle.write   := Mux(bus_owner_is_ptw, false.B, mem_write) // PTW 只讀
       axi_master.io.bundle.write_data   := cpu.io.memory_bundle.write_data
       axi_master.io.bundle.write_strobe := cpu.io.memory_bundle.write_strobe
 
@@ -45,7 +49,10 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
       cpu.io.memory_bundle.write_valid         := axi_master.io.bundle.write_valid
       cpu.io.memory_bundle.write_data_accepted := axi_master.io.bundle.write_data_accepted
       cpu.io.memory_bundle.busy                := axi_master.io.bundle.busy
-      cpu.io.memory_bundle.granted             := !axi_master.io.bundle.busy // Granted when not busy
+      cpu.io.memory_bundle.granted             := !axi_master.io.bundle.busy   // Granted when not busy
+
+      cpu.ptw.ptw_resp_valid := axi_master.io.bundle.read_valid && bus_owner_is_ptw
+      cpu.ptw.ptw_resp_data  := axi_master.io.bundle.read_data
 
       // Connect AXI4-Lite channels to top-level
       io.axi4_channels <> axi_master.io.channels
@@ -75,14 +82,14 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
 
       // New transaction starts when master is idle (not busy) and CPU issues a
       // read or write request on the BusBundle.
+      val ptw_read = bus_owner_is_ptw && cpu.ptw.ptw_req_valid
       val start_bus_transaction =
-        !axi_master.io.bundle.busy &&
-          cpu.io.memory_bundle.request &&
-          (cpu.io.memory_bundle.read || cpu.io.memory_bundle.write)
-
+        !axi_master.io.bundle.busy && (
+          ptw_read ||
+          (cpu.io.memory_bundle.request && (cpu.io.memory_bundle.read || cpu.io.memory_bundle.write))
+        )
       when(start_bus_transaction) {
-        bus_address_reg := next_bus_address
-
+        bus_address_reg := Mux(bus_owner_is_ptw, cpu.ptw.ptw_req_addr, full_bus_address)
       }
 
       io.bus_address := bus_address_reg

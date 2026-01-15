@@ -114,7 +114,6 @@ class InstructionFetch extends Module {
     val ibtb_update_target   = Input(UInt(Parameters.AddrWidth))
     // from MMU (I-side)
     val mmu_i_pa    = Input(UInt(Parameters.AddrWidth))
-    val mmu_i_stall = Input(Bool())
     val mmu_i_fault = Input(Bool())
 
     // to control / ID (for trap)
@@ -240,11 +239,11 @@ class InstructionFetch extends Module {
       take_pending                                  -> pending_jump_addr,
       take_btb_correction                           -> io.btb_correction_addr,
       take_current                                  -> io.jump_address_id,
-      (io.stall_flag_ctrl || !io.instruction_valid || io.mmu_i_stall || io.mmu_i_fault) -> pc
+      (io.stall_flag_ctrl || !io.instruction_valid || io.mmu_i_fault) -> pc
     )
   )
 
-  io.if_page_fault := io.mmu_i_fault && !io.mmu_i_stall && io.instruction_valid
+  io.if_page_fault := io.mmu_i_fault && io.instruction_valid
 
 
   pc := next_pc

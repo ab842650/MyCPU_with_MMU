@@ -62,6 +62,8 @@ class MemoryAccess extends Module {
     val wb_regs_write_address = Output(UInt(Parameters.PhysicalRegisterAddrWidth))
     val wb_regs_write_enable  = Output(Bool())
 
+    val mmu_stall = Input(Bool())   // D-side translation not ready / PTW active
+    val mmu_fault = Input(Bool())   // optional
 
     val bus = new BusBundle
   })
@@ -212,63 +214,72 @@ class MemoryAccess extends Module {
     }
   }.otherwise {
     // Idle state: check enable signals to start new transactions
+    when(io.mmu_fault) {
+      io.ctrl_stall_flag := false.B
+      // 不發 bus
+    }.elsewhen(io.mmu_stall) {
+      // ★關鍵：MMU 還沒 ready → MEM stage 先 stall、也不准開始 transaction
+      io.bus.request     := false.B
+      // mem_access_state 保持 Idle
 
-    when(io.memory_read_enable) {
-      // Start the read transaction when the bus is available
-      io.ctrl_stall_flag := true.B
-      io.bus.read        := true.B
-      io.bus.request     := true.B
-      // Capture control signals for MEM2WB when read starts
-      // These are latched so that when read_valid arrives and stall releases,
-      // MEM2WB can still capture the correct writeback info for the load instruction
-      latched_regs_write_source  := io.regs_write_source
-      latched_regs_write_address := io.regs_write_address
-      latched_regs_write_enable  := io.regs_write_enable
-      when(io.bus.granted) {
-        mem_access_state := MemoryAccessStates.Read
-      }
-    }.elsewhen(io.memory_write_enable) {
-      // Start the write transaction when the bus is available
-      io.ctrl_stall_flag  := true.B
-      io.bus.write_data   := io.reg2_data
-      io.bus.write        := true.B
-      io.bus.write_strobe := VecInit(Seq.fill(Parameters.WordSize)(false.B))
-      when(io.funct3 === InstructionsTypeS.sb) {
-        io.bus.write_strobe(mem_address_index) := true.B
-        // Fix: Use ByteBits-1 for correct 8-bit slice (was ByteBits which gave 9 bits)
-        io.bus.write_data := io.reg2_data(Parameters.ByteBits - 1, 0) << (mem_address_index << log2Up(
-          Parameters.ByteBits
-        ).U)
-      }.elsewhen(io.funct3 === InstructionsTypeS.sh) {
-        when(mem_address_index === 0.U) {
-          // Offset 0: write to bytes 0-1
-          io.bus.write_strobe(0) := true.B
-          io.bus.write_strobe(1) := true.B
-          io.bus.write_data      := io.reg2_data(15, 0)
-        }.elsewhen(mem_address_index === 1.U) {
-          // Offset 1: write to bytes 1-2
-          io.bus.write_strobe(1) := true.B
-          io.bus.write_strobe(2) := true.B
-          io.bus.write_data      := io.reg2_data(15, 0) << 8.U
-        }.elsewhen(mem_address_index === 2.U) {
-          // Offset 2: write to bytes 2-3
-          io.bus.write_strobe(2) := true.B
-          io.bus.write_strobe(3) := true.B
-          io.bus.write_data      := io.reg2_data(15, 0) << 16.U
-        }.otherwise {
-          // Offset 3: best-effort, write to bytes 2-3 (crosses word boundary)
-          io.bus.write_strobe(2) := true.B
-          io.bus.write_strobe(3) := true.B
-          io.bus.write_data      := io.reg2_data(15, 0) << 16.U
+    }.otherwise{
+      when(io.memory_read_enable) {
+        // Start the read transaction when the bus is available
+        io.ctrl_stall_flag := true.B
+        io.bus.read        := true.B
+        io.bus.request     := true.B
+        // Capture control signals for MEM2WB when read starts
+        // These are latched so that when read_valid arrives and stall releases,
+        // MEM2WB can still capture the correct writeback info for the load instruction
+        latched_regs_write_source  := io.regs_write_source
+        latched_regs_write_address := io.regs_write_address
+        latched_regs_write_enable  := io.regs_write_enable
+        when(io.bus.granted) {
+          mem_access_state := MemoryAccessStates.Read
         }
-      }.elsewhen(io.funct3 === InstructionsTypeS.sw) {
-        for (i <- 0 until Parameters.WordSize) {
-          io.bus.write_strobe(i) := true.B
+      }.elsewhen(io.memory_write_enable) {
+        // Start the write transaction when the bus is available
+        io.ctrl_stall_flag  := true.B
+        io.bus.write_data   := io.reg2_data
+        io.bus.write        := true.B
+        io.bus.write_strobe := VecInit(Seq.fill(Parameters.WordSize)(false.B))
+        when(io.funct3 === InstructionsTypeS.sb) {
+          io.bus.write_strobe(mem_address_index) := true.B
+          // Fix: Use ByteBits-1 for correct 8-bit slice (was ByteBits which gave 9 bits)
+          io.bus.write_data := io.reg2_data(Parameters.ByteBits - 1, 0) << (mem_address_index << log2Up(
+            Parameters.ByteBits
+          ).U)
+        }.elsewhen(io.funct3 === InstructionsTypeS.sh) {
+          when(mem_address_index === 0.U) {
+            // Offset 0: write to bytes 0-1
+            io.bus.write_strobe(0) := true.B
+            io.bus.write_strobe(1) := true.B
+            io.bus.write_data      := io.reg2_data(15, 0)
+          }.elsewhen(mem_address_index === 1.U) {
+            // Offset 1: write to bytes 1-2
+            io.bus.write_strobe(1) := true.B
+            io.bus.write_strobe(2) := true.B
+            io.bus.write_data      := io.reg2_data(15, 0) << 8.U
+          }.elsewhen(mem_address_index === 2.U) {
+            // Offset 2: write to bytes 2-3
+            io.bus.write_strobe(2) := true.B
+            io.bus.write_strobe(3) := true.B
+            io.bus.write_data      := io.reg2_data(15, 0) << 16.U
+          }.otherwise {
+            // Offset 3: best-effort, write to bytes 2-3 (crosses word boundary)
+            io.bus.write_strobe(2) := true.B
+            io.bus.write_strobe(3) := true.B
+            io.bus.write_data      := io.reg2_data(15, 0) << 16.U
+          }
+        }.elsewhen(io.funct3 === InstructionsTypeS.sw) {
+          for (i <- 0 until Parameters.WordSize) {
+            io.bus.write_strobe(i) := true.B
+          }
         }
-      }
-      io.bus.request := true.B
-      when(io.bus.granted) {
-        mem_access_state := MemoryAccessStates.Write
+        io.bus.request := true.B
+        when(io.bus.granted) {
+          mem_access_state := MemoryAccessStates.Write
+        }
       }
     }
   }

@@ -131,6 +131,28 @@ class PipelinedCPU extends Module {
   val csr_regs   = Module(new CSR)
   val mmu        = Module(new MMU)
 
+  val ptw = IO(new Bundle{
+      val ptw_req_valid  = Output(Bool())
+      val ptw_req_addr   = Output(UInt(Parameters.AddrWidth))
+      val ptw_active     = Output(Bool())
+
+      val ptw_resp_valid = Input(Bool())
+      val ptw_resp_data  = Input(UInt(Parameters.DataWidth))
+
+    }
+  )
+
+  // MMU -> PipelinedCPU (to outside)
+  ptw.ptw_req_valid := mmu.io.ptw_req_valid
+  ptw.ptw_req_addr  := mmu.io.ptw_req_addr
+  ptw.ptw_active    := mmu.io.ptw_active
+
+  // outside -> MMU (response)
+  mmu.io.ptw_resp_valid := ptw.ptw_resp_valid
+  mmu.io.ptw_resp_data  := ptw.ptw_resp_data
+
+
+
   ctrl.io.jump_flag               := id.io.if_jump_flag
   ctrl.io.jump_instruction_id     := id.io.ctrl_jump_instruction
   ctrl.io.rs1_id                  := id.io.regs_reg1_read_address
@@ -158,7 +180,8 @@ class PipelinedCPU extends Module {
   io.debug_read_data         := regs.io.debug_read_data
 
   // Memory stall signal: freeze entire pipeline when AXI4 bus transactions are pending
-  val mem_stall = mem.io.ctrl_stall_flag
+  // When PTW Stall 
+  val mem_stall = mem.io.ctrl_stall_flag || mmu.io.i_stall
 
   // Instruction memory interface
   io.instruction_address          := inst_fetch.io.instruction_address
@@ -187,12 +210,11 @@ class PipelinedCPU extends Module {
   mmu.io.enable := (csr_regs.io.satp_out(31) === 1.U)
   // I-side: VA from IF stage
   mmu.io.i_va    := inst_fetch.io.pc_va   // == current PC (VA)
-  mmu.io.i_valid := io.instruction_valid && !inst_fetch.io.stall_flag_ctrl
+  mmu.io.i_valid := io.instruction_valid 
 
   // feed MMU result back to IF
   inst_fetch.io.mmu_i_pa    := mmu.io.i_pa
   inst_fetch.io.mmu_i_fault := mmu.io.i_fault
-  inst_fetch.io.mmu_i_stall := mmu.io.i_stall 
 
   // D-side tie-off (until you really hook data MMU)
   mmu.io.d_va      := 0.U
@@ -200,6 +222,8 @@ class PipelinedCPU extends Module {
   mmu.io.d_isLoad  := false.B
   mmu.io.d_isStore := false.B
 
+  mem.io.mmu_stall := mmu.io.i_stall
+  mem.io.mmu_fault := mmu.io.i_fault
 
   // BTB misprediction detection - covers multiple cases:
   // 1. BTB predicted taken, but branch not taken (wrong direction)
