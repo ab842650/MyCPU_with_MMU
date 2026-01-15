@@ -12,7 +12,6 @@ class MMU extends Module {
     val i_valid = Input(Bool())
 
     val i_pa    = Output(UInt(Parameters.AddrWidth))
-    val i_stall = Output(Bool())
     val i_fault = Output(Bool())
 
     /* ========= D-side (v0 tie-off) ========= */
@@ -22,12 +21,12 @@ class MMU extends Module {
     val d_isStore = Input(Bool())
 
     val d_pa    = Output(UInt(Parameters.AddrWidth))
-    val d_stall = Output(Bool())
     val d_fault = Output(Bool())
 
     /* ========= Control ========= */
     val enable = Input(Bool()) // satp.mode != 0
     val satp   = Input(UInt(Parameters.DataWidth))
+    val ptw_stall = Output(Bool())
 
     /* ========= PTW memory port (MMU -> Bus -> MMU) ========= */
     val ptw_req_valid  = Output(Bool())
@@ -60,13 +59,16 @@ class MMU extends Module {
   val itlb_hit = itlb_valid && (cur_tag === itlb_tag)
   val itlb_pa  = Cat(itlb_ppn, cur_off)
 
-  // 1-entry D-TLB
+  // D-side tag (故意做得很細：幾乎每次都不同)
+  val d_tag = io.d_va
+  val d_off = io.d_va(11, 0)
+
+  // 1-entry D-TLB (tag -> ppn)
   val dtlb_valid = RegInit(false.B)
-  val dtlb_vpn   = Reg(UInt(20.W))   // VA[31:12]
+  val dtlb_tag   = Reg(UInt(30.W))
   val dtlb_ppn   = Reg(UInt(20.W))   // PA[31:12]
-  val d_vpn = io.d_va(31,12)
-  val d_off = io.d_va(11,0)
-  val dtlb_hit = dtlb_valid && (d_vpn === dtlb_vpn)
+
+  val dtlb_hit = dtlb_valid && (d_tag === dtlb_tag)
   val dtlb_pa  = Cat(dtlb_ppn, d_off)
 
   // ----------------------------------------
@@ -107,33 +109,49 @@ class MMU extends Module {
   io.ptw_req_addr  := 0.U
   io.ptw_active    := (state =/= sIdle)
 
-  io.i_pa    := io.i_va
-  io.i_stall := false.B
+  io.i_pa    := 0.U
+  io.ptw_stall := false.B
   io.i_fault := false.B
 
   // D-side tie-off (v0)
-  io.d_pa    := io.d_va
-  io.d_stall := false.B
+  io.d_pa    := 0.U
   io.d_fault := false.B
 
   // ----------------------------------------
   // Start condition: Sv32 enabled + valid fetch + idle + TLB miss
   // ----------------------------------------
-  val start_walk = sv32_on && io.i_valid && (state === sIdle) && !itlb_hit  
+  val i_miss = sv32_on && io.i_valid && !itlb_hit
+  val d_miss = sv32_on && io.d_valid && !dtlb_hit
+
+  // 同時 miss 時：i 優先
+  val choose_i = i_miss
+  val choose_d = !i_miss && d_miss
+
+
+
+  val start_walk =  (state === sIdle) && (choose_i || choose_d)
+  val latched_isD = RegInit(false.B)
 
   // Stall policy:
   // - Sv32 off: never stall
   // - PTW busy: stall
   // - idle but miss on valid fetch: stall (because we'll start PTW)
+  
   when(!sv32_on) {
-    io.i_pa    := io.i_va
-    io.i_stall := false.B
-  }.elsewhen(itlb_hit) {
-    io.i_pa    := itlb_pa
-    io.i_stall := false.B
+    io.i_pa := io.i_va
+    io.d_pa := io.d_va
+    io.ptw_stall := false.B
+
+  }.elsewhen(itlb_hit && (!io.d_valid || dtlb_hit)) {
+    io.i_pa := itlb_pa
+    io.d_pa := dtlb_pa
+    io.ptw_stall := false.B
+
   }.otherwise {
-    io.i_pa    := io.i_va
-    io.i_stall := true.B
+    // ★ TLB miss / PTW active：PA 強制 0
+    io.i_pa := 0.U
+    io.d_pa := 0.U
+    io.ptw_stall := true.B
   }
 
   // ----------------------------------------
@@ -142,7 +160,8 @@ class MMU extends Module {
   switch(state) {
     is(sIdle) {
       when(start_walk) {
-        latched_va := io.i_va
+        latched_va  := Mux(choose_d, io.d_va, io.i_va)
+        latched_isD := choose_d  // true: D-side, false: I-side
         state := sL1Req
       }
     }
@@ -168,9 +187,15 @@ class MMU extends Module {
           state := sFault
         }.elsewhen(isLeaf(p)) {
           // v0: treat L1 leaf as translation result and fill TLB
-          itlb_valid := true.B
-          itlb_tag   := latched_va(31, 2)
-          itlb_ppn   := latched_va(31, 12)
+          when(latched_isD) {
+            dtlb_valid := true.B
+            dtlb_tag   := latched_va   
+            dtlb_ppn   := latched_va(31, 12)   // 故意 VA=PA
+          }.otherwise {
+            itlb_valid := true.B
+            itlb_tag   := latched_va(31, 2)
+            itlb_ppn   := latched_va(31, 12)   // 故意 VA=PA
+          }
           state := sIdle
         }.otherwise {
           // v0: no L0 support yet

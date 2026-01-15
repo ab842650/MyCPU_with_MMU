@@ -65,14 +65,25 @@ class MemoryAccess extends Module {
     val mmu_stall = Input(Bool())   // D-side translation not ready / PTW active
     val mmu_fault = Input(Bool())   // optional
 
+    val d_pa=Input(UInt(Parameters.DataWidth))
+
+    val d_va = Output(UInt(Parameters.DataWidth))
+    val d_read_enable = Output(Bool())
+    val d_write_enable = Output(Bool())
+
     val bus = new BusBundle
   })
-  val mem_address_index = io.alu_result(log2Up(Parameters.WordSize) - 1, 0).asUInt
+  val mem_address_index = io.d_pa(log2Up(Parameters.WordSize) - 1, 0).asUInt
   val mem_access_state  = RegInit(MemoryAccessStates.Idle)
 
   // Register to hold the loaded data across the stall release cycle
   // This ensures the data persists until MEM2WB captures it
   val latched_memory_read_data = RegInit(0.U(Parameters.DataWidth))
+
+  //d_va to mmu
+  io.d_va := io.alu_result
+  io.d_read_enable := io.memory_read_enable
+  io.d_write_enable := io.memory_write_enable
 
   // Capture control signals when entering Read state
   // Although PipelineRegister is purely sequential (io.out := reg), we still latch

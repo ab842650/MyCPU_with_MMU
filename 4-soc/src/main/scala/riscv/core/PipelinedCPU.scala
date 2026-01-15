@@ -181,7 +181,7 @@ class PipelinedCPU extends Module {
 
   // Memory stall signal: freeze entire pipeline when AXI4 bus transactions are pending
   // When PTW Stall 
-  val mem_stall = mem.io.ctrl_stall_flag || mmu.io.i_stall
+  val mem_stall = mem.io.ctrl_stall_flag || mmu.io.ptw_stall
 
   // Instruction memory interface
   io.instruction_address          := inst_fetch.io.instruction_address
@@ -216,13 +216,16 @@ class PipelinedCPU extends Module {
   inst_fetch.io.mmu_i_pa    := mmu.io.i_pa
   inst_fetch.io.mmu_i_fault := mmu.io.i_fault
 
-  // D-side tie-off (until you really hook data MMU)
-  mmu.io.d_va      := 0.U
-  mmu.io.d_valid   := false.B
-  mmu.io.d_isLoad  := false.B
-  mmu.io.d_isStore := false.B
+  //feed MMU result back to MEM
+  mem.io.d_pa := mmu.io.d_pa
 
-  mem.io.mmu_stall := mmu.io.i_stall
+  // D-side tie-off (until you really hook data MMU)
+  mmu.io.d_va      := mem.io.d_va
+  mmu.io.d_valid   := mem.io.d_read_enable || mem.io.d_write_enable
+  mmu.io.d_isLoad  := mem.io.d_read_enable
+  mmu.io.d_isStore := mem.io.d_write_enable
+
+  mem.io.mmu_stall := mmu.io.ptw_stall
   mem.io.mmu_fault := mmu.io.i_fault
 
   // BTB misprediction detection - covers multiple cases:

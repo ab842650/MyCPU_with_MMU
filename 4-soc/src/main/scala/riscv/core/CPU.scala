@@ -44,8 +44,8 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
       axi_master.io.bundle.write_data   := cpu.io.memory_bundle.write_data
       axi_master.io.bundle.write_strobe := cpu.io.memory_bundle.write_strobe
 
-      cpu.io.memory_bundle.read_data           := axi_master.io.bundle.read_data
-      cpu.io.memory_bundle.read_valid          := axi_master.io.bundle.read_valid
+      cpu.io.memory_bundle.read_data           := Mux(bus_owner_is_ptw , 0.U , axi_master.io.bundle.read_data)
+      cpu.io.memory_bundle.read_valid          := Mux(bus_owner_is_ptw , 0.B , axi_master.io.bundle.read_valid)
       cpu.io.memory_bundle.write_valid         := axi_master.io.bundle.write_valid
       cpu.io.memory_bundle.write_data_accepted := axi_master.io.bundle.write_data_accepted
       cpu.io.memory_bundle.busy                := axi_master.io.bundle.busy
