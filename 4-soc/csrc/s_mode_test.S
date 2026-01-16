@@ -1,119 +1,113 @@
 .section .text
 .globl main
 
-.equ L1_PT_PA, 0x00005000     # physical address of L1 page table (4KB aligned)
+.equ L1_PT_PA,   0x00005000      # 4KB aligned
+.equ L0_PT0_PA,  0x00006000      # vpn1=0  -> VA 0x0000_0000 ~ 0x003F_FFFF
+.equ L0_PT1_PA,  0x00007000      # 仍可留著清掉，但這版不會用到它
 
-# PTE flags: V|R|W|X|A|D = 0xCF
-.equ PTE_FLAGS, 0x000000CF
+.equ PTE_PTR,    0x001           # V=1, R=W=X=0  (pointer)
+.equ PTE_LEAF,   0x0CF           # V|R|W|X|A|D
 
 main:
-  # marker: M-mode start
-  li  t0, 0x11112222
-  csrw mscratch, t0
-
-  # mtvec (optional)
-  la  t0, m_trap
+  # 1) mtvec 指到 trap entry
+  la   t0, __trap_entry
   csrw mtvec, t0
 
   # ---------------------------------------------------
-  # 1) Clear L1 page table (1024 entries * 4 = 4096 bytes)
+  # 2) clear L1 + L0 tables
   # ---------------------------------------------------
+  li   t2, 0
+
   li   t0, L1_PT_PA
   li   t1, 1024
-  li   t2, 0
-1:
-  sw   t2, 0(t0)
+1:sw   t2, 0(t0)
   addi t0, t0, 4
   addi t1, t1, -1
   bnez t1, 1b
 
-  # ---------------------------------------------------
-  # 2) Fill needed L1 leaf superpages (4MB each)
-  #    Sv32 L1 leaf: PTE.V=1 and (R|X)=1
-  #    For superpage: PPN0 must be 0 (it will be, since we only set bits [31:20])
-  # ---------------------------------------------------
-  li  t0, L1_PT_PA
-  li  t1, PTE_FLAGS
+  li   t0, L0_PT0_PA
+  li   t1, 1024
+2:sw   t2, 0(t0)
+  addi t0, t0, 4
+  addi t1, t1, -1
+  bnez t1, 2b
 
-  # VPN1 = 0  => VA 0x0000_0000 ~ 0x003F_FFFF  identity
-  # PPN1 = 0  => PA 0x0000_0000 ~ 0x003F_FFFF
-  sw  t1, 0(t0)
-
-  # VPN1 = 1  => VA 0x0040_0000 ~ 0x007F_FFFF identity
-  li  t2, (1 << 20)          # PPN1=1 goes to PTE[31:20]
-  or  t2, t2, t1
-  sw  t2, 4(t0)
-
-  # OPTIONAL but strongly recommended:
-  # Map a high superpage for stack if your sp is high (common: 0x8000_0000+)
-  # Example: map VPN1=0x200 (VA 0x8000_0000) identity to PA 0x8000_0000
-  # vpn1 = 0x8000_0000 >> 22 = 0x200
-  # entry_addr = L1_PT_PA + vpn1*4
-  li  t3, 0x200
-  slli t3, t3, 2              # vpn1*4
-  li  t0, L1_PT_PA
-  add  t0, t0, t3
-  li  t4, (0x200 << 20)        # PPN1 = 0x200 for PA 0x8000_0000
-  or  t4, t4, t1
-  sw  t4, 0(t0)
+  li   t0, L0_PT1_PA
+  li   t1, 1024
+3:sw   t2, 0(t0)
+  addi t0, t0, 4
+  addi t1, t1, -1
+  bnez t1, 3b
 
   # ---------------------------------------------------
-  # 3) Enter S-mode
+  # 3) L1[0] -> L0_PT0 (pointer)
+  #    L1[1] = superpage leaf (4MB) for VA 0x0040_0000~0x007F_FFFF
   # ---------------------------------------------------
-  csrr t1, mstatus
-  li   t0, ~(3 << 11)         # clear MPP
-  and  t1, t1, t0
-  li   t0, (1 << 11)          # MPP = S
-  or   t1, t1, t0
-  csrw mstatus, t1
+  li   t0, L1_PT_PA
 
-  la  t0, s_main
+  # L1[0] pointer -> L0_PT0
+  li   t1, (L0_PT0_PA >> 12)
+  slli t1, t1, 10
+  ori  t1, t1, PTE_PTR
+  sw   t1, 0(t0)              # entry vpn1=0
+
+  # L1[1] superpage leaf:
+  # PPN1 = 1, and PPN0 must be 0 => just put (1<<20) into PTE[31:20]
+  li   t2, (1 << 20)          # PPN1 goes to bits [31:20]
+  ori  t2, t2, PTE_LEAF
+  sw   t2, 4(t0)              # entry vpn1=1 (superpage leaf)
+
+  # ---------------------------------------------------
+  # 4) Fill L0_PT0: identity map 0~4MB (vpn1=0 chunk)
+  # ---------------------------------------------------
+  li   t0, L0_PT0_PA
+  li   t1, 0                  # vpn0
+4:
+  slli t2, t1, 12             # va within vpn1=0 region
+  srli t3, t2, 12             # ppn = va>>12 (identity)
+  slli t3, t3, 10
+  ori  t3, t3, PTE_LEAF
+  sw   t3, 0(t0)
+
+  addi t0, t0, 4
+  addi t1, t1, 1
+  li   t4, 1024
+  blt  t1, t4, 4b
+
+  # ---------------------------------------------------
+  # 5) Enter S-mode
+  # ---------------------------------------------------
+  csrr t0, mstatus
+  li   t1, ~(3 << 11)
+  and  t0, t0, t1
+  li   t1, (1 << 11)          # MPP=S
+  or   t0, t0, t1
+  csrw mstatus, t0
+
+  la   t0, s_main
   csrw mepc, t0
   mret
-
-# -------------------------
-# M-mode trap
-# -------------------------
-.align 4
-m_trap:
-  li  t0, 0xDEAD0001
-  csrw mscratch, t0
-  j   m_trap
 
 # =====================================================
 # S-mode main
 # =====================================================
 .align 4
 s_main:
-  li  t0, 0x33334444
-  lw t1,0(sp)
-  csrw sscratch, t0
-
-  # ---------------------------------------------------
-  # 4) Enable paging: satp.MODE=1 (Sv32), PPN = L1_PT_PA >> 12 = 0x5
-  # satp = (1<<31) | PPN
-  # ---------------------------------------------------
-  li  t0, (1 << 31) | (L1_PT_PA >> 12)   # 0x8000_0005
+  li   t0, (1 << 31) | (L1_PT_PA >> 12)
   csrw satp, t0
 
-  # keep pipeline busy
-  xor t1, t0, t0
-  add t2, t0, t1
-  sll t2, t2, t1
-  xor t3, t2, t0
+  # (A) 先踩 vpn1=1 superpage：sp=0x0040_0000 正在這 4MB 內
+  li   t1, 0xAABBCCDD
+  sw   t1, 0(sp)
+  lw   t2, 0(sp)
+  xor  t3, t1, t2             # t3 should be 0
 
-  # store -> load
-  li  t4, 0xAABBCCDD
-  sw  t4, 0(sp)
-  nop
-  nop
-  nop
-  nop
-  lw  t5, 0(sp)
-
-  # diff = expected ^ actual
-  xor t6, t4, t5
-  csrw sscratch, t6
+  # (B) 再踩 vpn1=0 的 L0 leaf：例如 VA=0x0000_1000
+  li   t4, 0x00001000
+  li   t5, 0x11223344
+  sw   t5, 0(t4)
+  lw   t6, 0(t4)
+  xor  a0, t5, t6             # a0 should be 0
 
 done:
   j done

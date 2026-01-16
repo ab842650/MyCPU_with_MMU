@@ -421,7 +421,7 @@ int main(int argc, char **argv)
 
     // Interactive terminal mode: no cycle limit (user exits with Ctrl-C)
     // Batch mode: 500M cycles to prevent runaway simulations
-    const uint64_t max_cycles = interactive_mode ? UINT64_MAX : 100000; //not too long
+    const uint64_t max_cycles = interactive_mode ? UINT64_MAX : 200000; //not too long
     uint64_t cycle = 0, last_report = 0, frames = 0;
     uint32_t vga_div = 0;
     bool prev_vsync = false, first_vsync = true;

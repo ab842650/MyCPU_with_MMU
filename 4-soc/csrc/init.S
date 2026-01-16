@@ -9,6 +9,7 @@
 
 .section .text.init
 .globl _start
+.globl __trap_entry
 _start:
   # Initialize global pointer for linker relaxation
   .option push
