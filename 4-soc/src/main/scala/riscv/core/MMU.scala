@@ -49,45 +49,90 @@ class MMU extends Module {
   val nWays = 2
 
 
-  val i_vpn = io.i_va(31, 12)
-  val i_off = io.i_va(11, 0)
-  val i_tag = i_vpn(19, 3)
-  val i_set = i_vpn(2, 0)
-
   val itlb_valid  = RegInit(VecInit(Seq.fill(nSets)(VecInit(Seq.fill(nWays)(false.B)))))
   val itlb_tag    = Reg(Vec(nSets, Vec(nWays, UInt(17.W))))
   val itlb_ppn    = Reg(Vec(nSets, Vec(nWays, UInt(20.W))))   // PA[31:12] for now
   val itlb_victim = RegInit(VecInit(Seq.fill(nSets)(0.U(1.W)))) // RR victim per set
+  val itlb_isSuper = RegInit(VecInit(Seq.fill(nSets)(VecInit(Seq.fill(nWays)(false.B))))) 
 
-  val i_hit_way0 = itlb_valid(i_set)(0) && (itlb_tag(i_set)(0) === i_tag)
-  val i_hit_way1 = itlb_valid(i_set)(1) && (itlb_tag(i_set)(1) === i_tag)
-  
-  val itlb_hit   = i_hit_way0 || i_hit_way1
-  val itlb_ppn_sel = Mux(i_hit_way0, itlb_ppn(i_set)(0), itlb_ppn(i_set)(1))
 
-  val itlb_pa = Cat(itlb_ppn_sel, i_off)
+  // ===== decode VA =====
+  val i_vpn1 = io.i_va(31,22)
+  val i_vpn0 = io.i_va(21,12)
+  val i_off  = io.i_va(11,0)
+
+  // 4KB key
+  val i_set4k = i_vpn0(2,0)          // VA[14:12]
+  val i_tag4k = io.i_va(31,15)       // 17b
+
+  // superpage(4MB) key
+  val i_setSp = i_vpn1(2,0)                          // VA[24:22]
+  val i_tagSp = Cat(0.U(10.W), i_vpn1(9,3))          // 17b (only 7 bits meaningful)
+
+  // ===== per-way hit =====
+  // 4KB: must NOT be super entry
+  val i4k_hit_w0 = itlb_valid(i_set4k)(0) && !itlb_isSuper(i_set4k)(0) && (itlb_tag(i_set4k)(0) === i_tag4k)
+  val i4k_hit_w1 = itlb_valid(i_set4k)(1) && !itlb_isSuper(i_set4k)(1) && (itlb_tag(i_set4k)(1) === i_tag4k)
+
+  // superpage: must be super entry
+  val isp_hit_w0 = itlb_valid(i_setSp)(0) &&  itlb_isSuper(i_setSp)(0) && (itlb_tag(i_setSp)(0) === i_tagSp)
+  val isp_hit_w1 = itlb_valid(i_setSp)(1) &&  itlb_isSuper(i_setSp)(1) && (itlb_tag(i_setSp)(1) === i_tagSp)
+
+  val i4k_hit = i4k_hit_w0 || i4k_hit_w1
+  val isp_hit = isp_hit_w0 || isp_hit_w1
+
+  val itlb_hit = i4k_hit || isp_hit
+
+  // ===== select ppn (4KB priority) =====
+  val i4k_ppn_sel = Mux(i4k_hit_w0, itlb_ppn(i_set4k)(0), itlb_ppn(i_set4k)(1))
+  val isp_ppn_sel = Mux(isp_hit_w0, itlb_ppn(i_setSp)(0), itlb_ppn(i_setSp)(1))
+
+  val itlb_ppn_sel = Mux(i4k_hit, i4k_ppn_sel, isp_ppn_sel)
+  val itlb_pa      = Cat(itlb_ppn_sel, i_off)
 
   // ----------------------------------------
   // D-tlb 2 way associate 8 set
   // ----------------------------------------
-  val d_vpn = io.d_va(31, 12)
-  val d_off = io.d_va(11, 0)
-  val d_tag = d_vpn(19, 3)
-  val d_set = d_vpn(2, 0)
-
   val dtlb_valid  = RegInit(VecInit(Seq.fill(nSets)(VecInit(Seq.fill(nWays)(false.B)))))
   val dtlb_tag    = Reg(Vec(nSets, Vec(nWays, UInt(17.W))))
   val dtlb_ppn    = Reg(Vec(nSets, Vec(nWays, UInt(20.W))))   // PA[31:12] for now
   val dtlb_victim = RegInit(VecInit(Seq.fill(nSets)(0.U(1.W)))) // RR victim per set
+  val dtlb_isSuper = RegInit(VecInit(Seq.fill(nSets)(VecInit(Seq.fill(nWays)(false.B)))))
 
-  val d_hit_way0 = dtlb_valid(d_set)(0) && (dtlb_tag(d_set)(0) === d_tag)
-  val d_hit_way1 = dtlb_valid(d_set)(1) && (dtlb_tag(d_set)(1) === d_tag)
 
-  val dtlb_hit   = d_hit_way0 || d_hit_way1
-  val d_hit_way  = Mux(d_hit_way0, 0.U(1.W), 1.U(1.W)) // way0 = 0, way1 = 1
-  val dtlb_ppn_sel = Mux(d_hit_way0, dtlb_ppn(d_set)(0), dtlb_ppn(d_set)(1))
 
-  val dtlb_pa = Cat(dtlb_ppn_sel, d_off)
+  val d_vpn1 = io.d_va(31,22)
+  val d_vpn0 = io.d_va(21,12)
+  val d_off  = io.d_va(11,0)
+
+  val d_set4k = d_vpn0(2,0)              // VA[14:12]
+  val d_tag4k = io.d_va(31,15)           // 17b = vpn1(9,0) ## vpn0(9,3)
+
+  // superpage(4MB) key
+  val d_setSp = d_vpn1(2,0)              // VA[24:22]
+  val d_tagSp = Cat(0.U(10.W), d_vpn1(9,3))  // 17b，
+
+  // ===== per-way hit =====
+  // 4KB hit: !isSuper
+  val d4k_hit_w0 = dtlb_valid(d_set4k)(0) && !dtlb_isSuper(d_set4k)(0) && (dtlb_tag(d_set4k)(0) === d_tag4k)
+  val d4k_hit_w1 = dtlb_valid(d_set4k)(1) && !dtlb_isSuper(d_set4k)(1) && (dtlb_tag(d_set4k)(1) === d_tag4k)
+
+  // super hit: isSuper
+  val dsp_hit_w0 = dtlb_valid(d_setSp)(0) &&  dtlb_isSuper(d_setSp)(0) && (dtlb_tag(d_setSp)(0) === d_tagSp)
+  val dsp_hit_w1 = dtlb_valid(d_setSp)(1) &&  dtlb_isSuper(d_setSp)(1) && (dtlb_tag(d_setSp)(1) === d_tagSp)
+
+  val d4k_hit = d4k_hit_w0 || d4k_hit_w1
+  val dsp_hit = dsp_hit_w0 || dsp_hit_w1
+
+  // ===== choose result =====
+  // prioritzie 4KB
+  val dtlb_hit = d4k_hit || dsp_hit
+
+  val d4k_ppn_sel = Mux(d4k_hit_w0, dtlb_ppn(d_set4k)(0), dtlb_ppn(d_set4k)(1))
+  val dsp_ppn_sel = Mux(dsp_hit_w0, dtlb_ppn(d_setSp)(0), dtlb_ppn(d_setSp)(1))
+
+  val dtlb_ppn_sel = Mux(d4k_hit, d4k_ppn_sel, dsp_ppn_sel)
+  val dtlb_pa      = Cat(dtlb_ppn_sel, d_off)
 
   // ----------------------------------------
   // PTW FSM (v0: single-level PTE fetch only)
@@ -102,7 +147,7 @@ class MMU extends Module {
   def pteX(p: UInt) = p(3)
   def pteA(p: UInt) = p(6)
   def pteD(p: UInt) = p(7)
-  def ptePPN(p: UInt) = p(31, 10) // 20 bits for Sv32 PPN
+  def ptePPN(p: UInt) = p(29, 10) // 20 bits for Sv32 PPN
 
   // latch the VA that caused the miss
   val latched_va = Reg(UInt(Parameters.AddrWidth))
@@ -291,13 +336,25 @@ class MMU extends Module {
       when (!perm_ok) {
         state := sFault
       }.otherwise {
-        // A/D handling (later)
+        // A/D handling (future)
         // TLB fill
-        val vpn_fill = latched_va(31,12)
-        val tag_fill = vpn_fill(19,3)     // 17b
-        val set_fill = vpn_fill(2,0)      // 3b
+        val isSuper_fill = (leaf_level === 1.U)
 
-        val final_ppn = Mux(leaf_level === 1.U,
+        val vpn1_fill = latched_va(31,22)  // 10b
+        val vpn0_fill = latched_va(21,12)  // 10b
+
+        
+        val set_fill = Mux(isSuper_fill,
+          vpn1_fill(2,0),   // super: VA[24:22]
+          vpn0_fill(2,0)    // 4KB:   VA[14:12]
+        )
+        
+        val tag_fill = Mux(isSuper_fill,
+          Cat(0.U(10.W), vpn1_fill(9,3)),  // super: tag in vpn1
+          latched_va(31,15)                // 4KB: tag17 = VA[31:15]
+        )
+
+        val final_ppn = Mux(isSuper_fill,
           superpagePPN20(leaf_pte, latched_va),
           ptePPN(leaf_pte)
         )
@@ -311,6 +368,7 @@ class MMU extends Module {
           dtlb_valid(set_fill)(d_way) := true.B
           dtlb_tag  (set_fill)(d_way) := tag_fill
           dtlb_ppn  (set_fill)(d_way) := final_ppn
+          dtlb_isSuper(set_fill)(d_way) := isSuper_fill
 
           // round-robin toggle (2-way)
           dtlb_victim(set_fill) := d_way ^ 1.U
@@ -323,6 +381,7 @@ class MMU extends Module {
           itlb_valid(set_fill)(i_way) := true.B
           itlb_tag  (set_fill)(i_way) := tag_fill
           itlb_ppn  (set_fill)(i_way) := final_ppn
+          itlb_isSuper(set_fill)(i_way) := isSuper_fill
 
           itlb_victim(set_fill) := i_way ^ 1.U
         }
