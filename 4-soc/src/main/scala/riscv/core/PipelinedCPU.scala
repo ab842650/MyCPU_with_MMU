@@ -214,7 +214,9 @@ class PipelinedCPU extends Module {
 
   // feed MMU result back to IF
   inst_fetch.io.mmu_i_pa    := mmu.io.i_pa
-  inst_fetch.io.mmu_i_fault := mmu.io.i_fault
+  inst_fetch.io.mmu_fault := mmu.io.i_fault || mmu.io.d_fault
+
+
 
   //feed MMU result back to MEM
   mem.io.d_pa := mmu.io.d_pa
@@ -226,7 +228,6 @@ class PipelinedCPU extends Module {
   mmu.io.d_isStore := mem.io.d_write_enable
 
   mem.io.mmu_stall := mmu.io.ptw_stall
-  mem.io.mmu_fault := mmu.io.i_fault
 
   // BTB misprediction detection - covers multiple cases:
   // 1. BTB predicted taken, but branch not taken (wrong direction)
@@ -417,8 +418,6 @@ class PipelinedCPU extends Module {
   if2id.io.ibtb_predicted_valid  := inst_fetch.io.ibtb_predicted_valid
   if2id.io.ibtb_predicted_target := inst_fetch.io.ibtb_predicted_target
 
-  if2id.io.if_page_fault := inst_fetch.io.if_page_fault
-  if2id.io.pc_va    := inst_fetch.io.pc_va
 
   id.io.instruction               := if2id.io.output_instruction
   id.io.instruction_address       := if2id.io.output_instruction_address
@@ -538,9 +537,6 @@ class PipelinedCPU extends Module {
   clint.io.interrupt_flag         := io.interrupt_flag // Direct connection, bypass IF2ID pipeline delay
   clint.io.csr_bundle <> csr_regs.io.clint_access_bundle
   clint.io.priv_mode := csr_regs.io.priv_mode_out //priv mode
-
-  clint.io.if_page_fault := if2id.io.output_if_page_fault //i side page fault
-  clint.io.if_fault_va   := if2id.io.pc_va
 
   csr_regs.io.reg_read_address_id    := id.io.ex_csr_address
   csr_regs.io.reg_write_enable_ex    := id2ex.io.output_csr_write_enable

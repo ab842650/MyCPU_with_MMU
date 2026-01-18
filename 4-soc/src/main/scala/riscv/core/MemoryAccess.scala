@@ -63,7 +63,6 @@ class MemoryAccess extends Module {
     val wb_regs_write_enable  = Output(Bool())
 
     val mmu_stall = Input(Bool())   // D-side translation not ready / PTW active
-    val mmu_fault = Input(Bool())   // optional
 
     val d_pa=Input(UInt(Parameters.DataWidth))
 
@@ -225,10 +224,7 @@ class MemoryAccess extends Module {
     }
   }.otherwise {
     // Idle state: check enable signals to start new transactions
-    when(io.mmu_fault) {
-      io.ctrl_stall_flag := false.B
-      // 不發 bus
-    }.elsewhen(io.mmu_stall) {
+    when(io.mmu_stall) {
       // ★關鍵：MMU 還沒 ready → MEM stage 先 stall、也不准開始 transaction
       io.bus.request     := false.B
       // mem_access_state 保持 Idle

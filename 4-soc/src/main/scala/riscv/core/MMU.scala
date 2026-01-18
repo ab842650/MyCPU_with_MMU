@@ -33,7 +33,12 @@ class MMU extends Module {
     val ptw_resp_valid = Input(Bool())
     val ptw_resp_data  = Input(UInt(Parameters.DataWidth))  // contains PTE in low 32 bits
     val ptw_active     = Output(Bool())
+
+
+
   })
+
+  val fault_pending = RegInit(false.B)
 
   // ----------------------------------------
   // Basic decode
@@ -135,12 +140,12 @@ class MMU extends Module {
   val dtlb_pa      = Cat(dtlb_ppn_sel, d_off)
 
   // ----------------------------------------
-  // PTW FSM (v0: single-level PTE fetch only)
+  // PTW FSM 
   // ----------------------------------------
   val sIdle :: sL1Req :: sL1Wait :: sL0Req :: sL0Wait :: sLeaf :: sFault :: Nil = Enum(7)
   val state = RegInit(sIdle)
 
-  // PTE helpers (v0 minimal)
+  // PTE helpers 
   def pteV(p: UInt) = p(0) 
   def pteR(p: UInt) = p(1) 
   def pteW(p: UInt) = p(2)
@@ -390,6 +395,7 @@ class MMU extends Module {
     }
 
     is(sFault) {
+      io.ptw_stall := false.B
       io.i_fault := !latched_isD
       io.d_fault :=  latched_isD
       state := sIdle

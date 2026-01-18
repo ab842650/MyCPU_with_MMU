@@ -31,9 +31,6 @@ class CLINT extends Module {
 
     val priv_mode = Input(UInt(2.W)) //current mode
 
-    // from IF/MMU
-    val if_page_fault = Input(Bool())
-    val if_fault_va   = Input(UInt(Parameters.AddrWidth))
 
 
     val csr_bundle = new CSRDirectAccessBundle
@@ -44,7 +41,7 @@ class CLINT extends Module {
 
 
       //page fault
-  val is_if_page_fault = io.if_page_fault
+  val is_if_page_fault = false.B
   val if_pf_cause     = 12.U  // Instruction page fault
 
   //val cur_priv = Mux(io.priv_mode === 0.U, PrivMode.M, io.priv_mode) // for testing
@@ -203,7 +200,7 @@ class CLINT extends Module {
       io.csr_bundle.sstatus_write_data := sstatus_disable_interrupt
       io.csr_bundle.sepc_write_data    := instruction_address
       io.csr_bundle.scause_write_data  := trap_cause
-      io.csr_bundle.stval_write_data := Mux(is_if_page_fault, io.if_fault_va, 0.U)
+      io.csr_bundle.stval_write_data := Mux(is_if_page_fault, 0.U, 0.U)
       io.csr_bundle.direct_write_enable_s := true.B
       io.id_interrupt_assert := true.B
       io.id_interrupt_handler_address := io.csr_bundle.stvec
