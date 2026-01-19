@@ -40,7 +40,7 @@ class CPU(val implementation: Int = ImplementationType.FiveStageFinal) extends M
       // BusBundle to AXI4LiteMasterBundle adapter
       axi_master.io.bundle.address := Mux(bus_owner_is_ptw, cpu.ptw.ptw_req_addr, full_bus_address)
       axi_master.io.bundle.read    := Mux(bus_owner_is_ptw, cpu.ptw.ptw_req_valid, mem_read)
-      axi_master.io.bundle.write   := Mux(bus_owner_is_ptw, false.B, mem_write) // PTW 只讀
+      axi_master.io.bundle.write   := Mux(bus_owner_is_ptw, false.B, mem_write) // PTW read only for now
       axi_master.io.bundle.write_data   := cpu.io.memory_bundle.write_data
       axi_master.io.bundle.write_strobe := cpu.io.memory_bundle.write_strobe
 

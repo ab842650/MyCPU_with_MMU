@@ -3,41 +3,37 @@
 
 .equ L1_PT_PA,   0x00005000      # 4KB aligned
 .equ L0_PT0_PA,  0x00006000      # vpn1=0  -> VA 0x0000_0000 ~ 0x003F_FFFF
-.equ L0_PT1_PA,  0x00007000      # 仍可留著清掉，但這版不會用到它
 
 .equ PTE_PTR,    0x001           # V=1, R=W=X=0  (pointer)
 .equ PTE_LEAF,   0x0CF           # V|R|W|X|A|D
 
 main:
-  # 1) mtvec 指到 trap entry
+  # 1) mtvec point to trap entry
   la   t0, __trap_entry
   csrw mtvec, t0
 
   # ---------------------------------------------------
-  # 2) clear L1 + L0 tables
+  # 2) clear L1 + L0 tables (only tables we use)
   # ---------------------------------------------------
   li   t2, 0
 
+  # clear L1 page table @ L1_PT_PA
   li   t0, L1_PT_PA
   li   t1, 1024
-1:sw   t2, 0(t0)
+1:
+  sw   t2, 0(t0)
   addi t0, t0, 4
   addi t1, t1, -1
   bnez t1, 1b
 
+  # clear L0_PT0 @ L0_PT0_PA
   li   t0, L0_PT0_PA
   li   t1, 1024
-2:sw   t2, 0(t0)
+2:
+  sw   t2, 0(t0)
   addi t0, t0, 4
   addi t1, t1, -1
   bnez t1, 2b
-
-  li   t0, L0_PT1_PA
-  li   t1, 1024
-3:sw   t2, 0(t0)
-  addi t0, t0, 4
-  addi t1, t1, -1
-  bnez t1, 3b
 
   # ---------------------------------------------------
   # 3) L1[0] -> L0_PT0 (pointer)
@@ -89,7 +85,7 @@ main:
   mret
 
 # =====================================================
-# S-mode main (stress TLB replacement lightly)
+# S-mode main 
 # =====================================================
 .align 4
 s_main:
