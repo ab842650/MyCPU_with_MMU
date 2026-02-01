@@ -100,6 +100,10 @@ object InstructionsRet {
   val ret  = 0x00008067L.U(Parameters.DataWidth)
 }
 
+object InstructionsSFence {
+  val sfence_vma_all = 0x12000073L.U(Parameters.DataWidth) // rs1=0 rs2=0 ; only flush all now
+}
+
 object InstructionsEnv {
   val ecall  = 0x00000073L.U(Parameters.DataWidth)
   val ebreak = 0x00100073L.U(Parameters.DataWidth)

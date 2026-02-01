@@ -41,6 +41,7 @@ class InstructionDecode extends Module {
     val clint_jump_address     = Output(UInt(Parameters.AddrWidth)) // clint.io.jump_address
     val if_jump_flag           = Output(Bool())                     // ctrl.io.jump_flag , inst_fetch.io.jump_flag_id
     val if_jump_address        = Output(UInt(Parameters.AddrWidth)) // inst_fetch.io.jump_address_id
+    val is_sfence              = Output(Bool())                     // clear tlb,executed in wb stage
   })
   val opcode = io.instruction(6, 0)
   val funct3 = io.instruction(14, 12)
@@ -60,6 +61,9 @@ class InstructionDecode extends Module {
     (opcode === InstructionTypes.L) || (opcode === InstructionTypes.S) || (opcode === InstructionTypes.B) ||
     (opcode === Instructions.jalr) || (opcode === Instructions.csr && !csr_uses_uimm)
   val uses_rs2 = (opcode === InstructionTypes.RM) || (opcode === InstructionTypes.S) || (opcode === InstructionTypes.B)
+
+  val sfence = (io.instruction === InstructionsSFence.sfence_vma_all) // flush tlb
+  io.is_sfence := Mux(sfence,true.B,false.B)
 
   io.regs_reg1_read_address := Mux(uses_rs1, rs1, 0.U(Parameters.PhysicalRegisterAddrWidth))
   io.regs_reg2_read_address := Mux(uses_rs2, rs2, 0.U(Parameters.PhysicalRegisterAddrWidth))

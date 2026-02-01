@@ -34,6 +34,7 @@ class MMU extends Module {
     val ptw_resp_data  = Input(UInt(Parameters.DataWidth))  // contains PTE in low 32 bits
     val ptw_active     = Output(Bool())
 
+    val tlb_flush      = Input(Bool())
 
 
   })
@@ -239,6 +240,20 @@ class MMU extends Module {
     io.ptw_stall := true.B
   }
 
+  when (io.tlb_flush) {
+    // cleat all tlb entries
+    for (s <- 0 until nSets) {
+      for (w <- 0 until nWays) {
+        itlb_valid(s)(w) := false.B
+        dtlb_valid(s)(w) := false.B
+        itlb_isSuper(s)(w) := false.B
+        dtlb_isSuper(s)(w) := false.B
+      }
+      itlb_victim(s) := 0.U
+      dtlb_victim(s) := 0.U
+    }
+  }
+
   // ----------------------------------------
   // FSM
   // ----------------------------------------
@@ -255,7 +270,6 @@ class MMU extends Module {
           latched_isLoad  := false.B
           latched_isStore := false.B
         }
-
         state := sL1Req
       }
     }

@@ -15,9 +15,14 @@ class WriteBack extends Module {
     val memory_read_data    = Input(UInt(Parameters.DataWidth))
     val regs_write_source   = Input(UInt(2.W))
     val csr_read_data       = Input(UInt(Parameters.DataWidth))
+    val is_sfence           = Input(Bool())
 
+    val tlb_flush           = Output(Bool())
     val regs_write_data = Output(UInt(Parameters.DataWidth))
   })
+
+  io.tlb_flush := Mux(io.is_sfence,true.B,false.B)
+
   io.regs_write_data := MuxLookup(
     io.regs_write_source,
     io.alu_result

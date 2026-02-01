@@ -85,133 +85,45 @@ main:
   mret
 
 # =====================================================
-# S-mode main 
+# S-mode main (sfence.vma test)
 # =====================================================
 .align 4
 s_main:
+  # enable Sv32
   li   t0, (1 << 31) | (L1_PT_PA >> 12)
   csrw satp, t0
 
-  li   s0, 0                 # error accumulator (0 = pass)
-
-  # ===================================================
-  # (A) Superpage region (vpn1=1 megapage)
-  # touch a few addresses: base + 0x1000*k + small offset
-  # ===================================================
-  li   s1, 0x00400000         # superpage base
-  li   s2, 0xA0000000         # seed
-
-  # A0: [0x00401000]
-  li   t1, 0x00401000
-  li   t2, 0xA0000001
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-  # A1: [0x00402004]
-  li   t1, 0x00402004
-  li   t2, 0xA0000002
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-  # A2: [0x00403008]
-  li   t1, 0x00403008
-  li   t2, 0xA0000003
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-  # A3: [0x0040400C]
-  li   t1, 0x0040400C
-  li   t2, 0xA0000004
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-
-  # ===================================================
-  # (B) 4KB region (vpn1=0 via L0)
-  # Force SAME set conflicts:
-  # base = 0x00001000 keeps VA[14:12]=001
-  # stride = 0x8000 changes VA[21:15] (tag) but keeps set
-  # Touch 6 distinct pages => must evict in 2-way
-  # ===================================================
-  li   s4, 0xCAFE0000
-
-  # B0: 0x00001000
+  # ---------------------------------------------------
+  # Target VA for sfence test
+  # ---------------------------------------------------
   li   t1, 0x00001000
-  li   t2, 0xCAFE1000
+
+  # ---------------------------------------------------
+  # (1) First access -> expect TLB miss + PTW
+  # ---------------------------------------------------
+  li   t2, 0x11111111
   sw   t2, 0(t1)
   lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
 
-  # B1: 0x00009000
-  li   t1, 0x00009000
-  li   t2, 0xCAFE1001
+  # ---------------------------------------------------
+  # (2) Second access (same VA) -> expect TLB hit
+  # ---------------------------------------------------
+  li   t2, 0x22222222
   sw   t2, 0(t1)
   lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
 
-  # B2: 0x00011000
-  li   t1, 0x00011000
-  li   t2, 0xCAFE1002
+  # ---------------------------------------------------
+  # (3) sfence.vma (flush all)
+  # ---------------------------------------------------
+  sfence.vma x0, x0
+
+  # ---------------------------------------------------
+  # (4) Third access after sfence
+  #     -> MUST miss again and re-walk PTW
+  # ---------------------------------------------------
+  li   t2, 0x33333333
   sw   t2, 0(t1)
   lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-  # B3: 0x00019000
-  li   t1, 0x00019000
-  li   t2, 0xCAFE1003
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-  # B4: 0x00021000
-  li   t1, 0x00021000
-  li   t2, 0xCAFE1004
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-  # B5: 0x00029000
-  li   t1, 0x00029000
-  li   t2, 0xCAFE1005
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-
-  # ===================================================
-  # (C) Re-touch first two addresses again
-  # If replacement is working, at least one should miss/refill
-  # ===================================================
-  # C0: 0x00001000 again
-  li   t1, 0x00001000
-  li   t2, 0xDEAD0000
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
-  # C1: 0x00009000 again
-  li   t1, 0x00009000
-  li   t2, 0xDEAD0001
-  sw   t2, 0(t1)
-  lw   t3, 0(t1)
-  xor  t4, t2, t3
-  or   s0, s0, t4
-
 
 done:
   j done

@@ -47,6 +47,7 @@ class ID2EX extends Module {
     val memory_read_enable     = Input(Bool())
     val memory_write_enable    = Input(Bool())
     val csr_read_data          = Input(UInt(Parameters.DataWidth))
+    val is_sfence              = Input(Bool())
 
     val output_instruction            = Output(UInt(Parameters.DataWidth))
     val output_instruction_address    = Output(UInt(Parameters.AddrWidth))
@@ -65,6 +66,7 @@ class ID2EX extends Module {
     val output_memory_read_enable     = Output(Bool())
     val output_memory_write_enable    = Output(Bool())
     val output_csr_read_data          = Output(UInt(Parameters.DataWidth))
+    val output_is_sfence              = Output(Bool())
   })
   val stall = io.stall
 
@@ -169,4 +171,11 @@ class ID2EX extends Module {
   csr_read_data.io.stall  := stall
   csr_read_data.io.flush  := io.flush
   io.output_csr_read_data := csr_read_data.io.out
+
+  val is_sfence = Module(new PipelineRegister(1, 0.U))
+  is_sfence.io.in    := io.is_sfence.asUInt
+  is_sfence.io.stall := stall
+  is_sfence.io.flush := io.flush
+  io.output_is_sfence  := is_sfence.io.out
+
 }

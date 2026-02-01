@@ -150,7 +150,9 @@ class PipelinedCPU extends Module {
   // outside -> MMU (response)
   mmu.io.ptw_resp_valid := ptw.ptw_resp_valid
   mmu.io.ptw_resp_data  := ptw.ptw_resp_data
+  mmu.io.tlb_flush      := wb.io.tlb_flush
 
+  val sfence_ctrl = ex2mem.io.is_sfence || mem2wb.io.is_sfence || wb.io.is_sfence // if sfence stall and flush
 
 
   ctrl.io.jump_flag               := id.io.if_jump_flag
@@ -185,7 +187,7 @@ class PipelinedCPU extends Module {
 
   // Instruction memory interface
   io.instruction_address          := inst_fetch.io.instruction_address
-  inst_fetch.io.stall_flag_ctrl   := ctrl.io.pc_stall || mem_stall
+  inst_fetch.io.stall_flag_ctrl   := ctrl.io.pc_stall || mem_stall || sfence_ctrl
   inst_fetch.io.jump_flag_id      := id.io.if_jump_flag
   inst_fetch.io.jump_address_id   := id.io.if_jump_address
   inst_fetch.io.rom_instruction   := io.instruction
@@ -406,8 +408,9 @@ class PipelinedCPU extends Module {
   //   IF already fetched the correct next instruction, so no flush needed!
   val prediction_correct = btb_correct_prediction || ras_correct_predict || ibtb_correct_predict
   val need_if_flush =
-    (ctrl.io.if_flush && !prediction_correct) || btb_mispredict || ras_wrong_target || ibtb_wrong_target
-  if2id.io.flush                 := need_if_flush && !mem_stall
+    (ctrl.io.if_flush && !prediction_correct) || btb_mispredict || ras_wrong_target || ibtb_wrong_target 
+
+  if2id.io.flush                 := need_if_flush && !mem_stall || sfence_ctrl
   if2id.io.instruction           := inst_fetch.io.id_instruction
   if2id.io.instruction_address   := inst_fetch.io.instruction_address
   if2id.io.interrupt_flag        := io.interrupt_flag
@@ -461,6 +464,7 @@ class PipelinedCPU extends Module {
   id2ex.io.memory_read_enable     := id.io.ex_memory_read_enable
   id2ex.io.memory_write_enable    := id.io.ex_memory_write_enable
   id2ex.io.csr_read_data          := csr_regs.io.id_reg_read_data
+  id2ex.io.is_sfence              := id.io.is_sfence
 
   ex.io.instruction         := id2ex.io.output_instruction
   ex.io.instruction_address := id2ex.io.output_instruction_address
@@ -486,6 +490,7 @@ class PipelinedCPU extends Module {
   ex2mem.io.memory_write_enable := id2ex.io.output_memory_write_enable
   ex2mem.io.alu_result          := ex.io.mem_alu_result
   ex2mem.io.csr_read_data       := id2ex.io.output_csr_read_data
+  ex2mem.io.is_sfence           := id2ex.io.output_is_sfence
 
   mem.io.alu_result          := ex2mem.io.output_alu_result
   mem.io.reg2_data           := ex2mem.io.output_reg2_data
@@ -514,12 +519,14 @@ class PipelinedCPU extends Module {
   mem2wb.io.regs_write_address := mem.io.wb_regs_write_address
   mem2wb.io.memory_read_data   := mem.io.wb_memory_read_data
   mem2wb.io.csr_read_data      := ex2mem.io.output_csr_read_data
+  mem2wb.io.is_sfence          := ex2mem.io.output_is_sfence
 
   wb.io.instruction_address := mem2wb.io.output_instruction_address
   wb.io.alu_result          := mem2wb.io.output_alu_result
   wb.io.memory_read_data    := mem2wb.io.output_memory_read_data
   wb.io.regs_write_source   := mem2wb.io.output_regs_write_source
   wb.io.csr_read_data       := mem2wb.io.output_csr_read_data
+  wb.io.is_sfence           := mem2wb.io.output_is_sfence
 
   forwarding.io.rs1_id               := id.io.regs_reg1_read_address
   forwarding.io.rs2_id               := id.io.regs_reg2_read_address

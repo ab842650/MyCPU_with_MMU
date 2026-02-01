@@ -35,6 +35,7 @@ class MEM2WB extends Module {
     val regs_write_address  = Input(UInt(Parameters.AddrWidth))
     val memory_read_data    = Input(UInt(Parameters.DataWidth))
     val csr_read_data       = Input(UInt(Parameters.DataWidth))
+    val is_sfence           = Input(Bool())
 
     val output_instruction_address = Output(UInt(Parameters.AddrWidth))
     val output_alu_result          = Output(UInt(Parameters.DataWidth))
@@ -43,6 +44,7 @@ class MEM2WB extends Module {
     val output_regs_write_address  = Output(UInt(Parameters.AddrWidth))
     val output_memory_read_data    = Output(UInt(Parameters.DataWidth))
     val output_csr_read_data       = Output(UInt(Parameters.DataWidth))
+    val output_is_sfence           = Output(Bool())
   })
   val stall = io.stall
   val flush = false.B
@@ -88,4 +90,10 @@ class MEM2WB extends Module {
   csr_read_data.io.stall  := stall
   csr_read_data.io.flush  := flush
   io.output_csr_read_data := csr_read_data.io.out
+
+  val is_sfence = Module(new PipelineRegister(1, 0.U))
+  is_sfence.io.in    := io.is_sfence.asUInt
+  is_sfence.io.stall := stall
+  is_sfence.io.flush := flush
+  io.output_is_sfence  := is_sfence.io.out
 }
