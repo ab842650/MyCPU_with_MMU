@@ -68,8 +68,11 @@ make shell
 # Run simulation with custom binary
 make sim BINARY=csrc/nyancat.asmbin
 
-# Run RISCOF compliance tests
+# Run RISCOF compliance tests (RV32I + Zicsr: 119/119 pass)
 make compliance
+
+# Stop a simulation after N cycles (e.g. to keep a VCD small)
+verilog/verilator/obj_dir/VTop -i csrc/uart.asmbin --headless --max-cycles 100000
 
 # Format code
 make indent
@@ -151,13 +154,36 @@ again. The privileged spec permits this behavior.
   make fetch   # sparse-clone rv32emu's test sources
   make run
   ```
-  It currently fails, because it expects hardware A/D updates (see Known Limitations)
+  Current status:
+
+  | Variant | Result |
+  |---|---|
+  | Unmodified test | Fails: `assert(freelist_head)` before the first test prints |
+  | Handler patched to always set PTE.D | All 4 tests pass (fetch, load, store, redirected faults), `exit(0)`, ~441M cycles |
+
+  The unmodified test fails because its fault handler maps a page with D=0 and then
+  `memcpy`s into it. rv32emu sets D in hardware (Svadu). Here (Svade) that store faults
+  again inside the handler, and the handler allocates a new frame on every retry until
+  the free list runs out. The one-line patch does what Svadu hardware would do.
+
+  The pass also depends on two gaps, so it is not full conformance:
+  - The "user" code runs in S-mode (no U-mode), and PTE.U / SUM are not checked. A
+    spec-compliant S-mode could not execute those U pages
+  - The firmware does not add 4 to `mepc` after `ecall`, because the CLINT already
+    records the next instruction (see Known Limitations)
+
+  Running this test found two pipeline bugs, both now fixed: a jump taken just before a
+  stall was taken again after it (an instruction fetched twice), and a Control stall
+  without a bubble copied the ID instruction into EX (`auipc ra; jalr ra,off(ra)`
+  jumped to the wrong target)
 
 ### Known Limitations
 
 - No U-mode: `sret` always returns to S-mode, and PTE.U / `sstatus.SUM` / `sstatus.MXR`
   are not checked
-- No hardware A/D update (Svadu). rv32emu's MMU test needs it
+- No hardware A/D update (Svadu). rv32emu's MMU test needs it (see Tests)
+- `ecall` writes the address of the next instruction to `mepc`/`sepc`, not the `ecall`
+  itself, so handlers must not add 4
 - No ASIDs; `sfence.vma` always flushes the whole TLB
 - If the TLB is flushed or `satp` changes while a load/store is waiting on the bus, the
   access is re-issued after the walk. This is harmless for RAM but repeats MMIO side effects
