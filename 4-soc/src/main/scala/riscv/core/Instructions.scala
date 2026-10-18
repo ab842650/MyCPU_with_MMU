@@ -101,7 +101,12 @@ object InstructionsRet {
 }
 
 object InstructionsSFence {
-  val sfence_vma_all = 0x12000073L.U(Parameters.DataWidth) // rs1=0 rs2=0 ; only flush all now
+  val sfence_vma_all = 0x12000073L.U(Parameters.DataWidth) // rs1=0 rs2=0
+
+  // Any SFENCE.VMA (rs1 = vaddr, rs2 = asid, both optional). The TLB has no ASIDs and
+  // is small, so every form flushes the whole TLB, which the spec permits.
+  def isSfenceVma(inst: UInt): Bool =
+    inst(31, 25) === "b0001001".U && inst(14, 7) === 0.U && inst(6, 0) === "b1110011".U
 }
 
 object InstructionsEnv {

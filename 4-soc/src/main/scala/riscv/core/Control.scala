@@ -254,7 +254,11 @@ class Control extends Module {
 
   // Detect RAW hazard: branch/jump in ID needs value from EX stage (not yet computed)
   // When this is true, forwarding would get wrong value from MEM stage
+  // Only an EX instruction that actually writes rd counts: a branch/store has
+  // imm bits in [11:7], and a stalled branch copied into EX could otherwise "depend
+  // on itself" forever (deadlock seen with bne a6,a0 whose imm[4:1|11] == 16 == a6).
   val ex_hazard_for_branch = io.jump_instruction_id &&
+    io.regs_write_enable_ex &&
     io.rd_ex =/= 0.U &&
     (io.rd_ex === io.rs1_id || io.rd_ex === io.rs2_id)
 
@@ -325,7 +329,7 @@ class Control extends Module {
     // This condition detects multiple hazard scenarios requiring stalls:
 
     // --- Condition 1: EX stage hazards (1-cycle dependencies) ---
-    ((io.jump_instruction_id || io.memory_read_enable_ex) && // Either:
+    (((io.jump_instruction_id && io.regs_write_enable_ex) || io.memory_read_enable_ex) && // Either:
       // - Jump in ID needs register value, OR
       // - Load in EX (load-use hazard)
       io.rd_ex =/= 0.U &&                                 // Destination is not x0

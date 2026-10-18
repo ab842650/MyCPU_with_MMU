@@ -62,7 +62,7 @@ class InstructionDecode extends Module {
     (opcode === Instructions.jalr) || (opcode === Instructions.csr && !csr_uses_uimm)
   val uses_rs2 = (opcode === InstructionTypes.RM) || (opcode === InstructionTypes.S) || (opcode === InstructionTypes.B)
 
-  val sfence = (io.instruction === InstructionsSFence.sfence_vma_all) // flush tlb
+  val sfence = InstructionsSFence.isSfenceVma(io.instruction) // flush tlb (any rs1/rs2)
   io.is_sfence := Mux(sfence,true.B,false.B)
 
   io.regs_reg1_read_address := Mux(uses_rs1, rs1, 0.U(Parameters.PhysicalRegisterAddrWidth))
