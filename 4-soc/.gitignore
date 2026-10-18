@@ -1,0 +1,4 @@
+csrc/rv32emu_mmu/*.bin
+csrc/rv32emu_mmu/*.elf
+csrc/rv32emu_mmu/*.asmbin
+csrc/rv32emu_mmu/rv32emu/
