@@ -375,7 +375,7 @@ int main(int argc, char **argv)
     }
 
     auto top = std::make_unique<VTop>();
-    Memory mem(4 * 1024 * 1024);  // 4MB (stack starts at 0x400000)
+    Memory mem(16 * 1024 * 1024);  // 16MB (stack starts at 0x400000; rv32emu mmu test uses up to ~8MB)
     //vcd trace
     VCDTracer vcd;
     vluint64_t vcd_time = 0;
@@ -421,7 +421,7 @@ int main(int argc, char **argv)
 
     // Interactive terminal mode: no cycle limit (user exits with Ctrl-C)
     // Batch mode: 500M cycles to prevent runaway simulations
-    const uint64_t max_cycles = interactive_mode ? UINT64_MAX : 200000; //not too long
+    const uint64_t max_cycles = interactive_mode ? UINT64_MAX : 500000000ULL;
     uint64_t cycle = 0, last_report = 0, frames = 0;
     uint32_t vga_div = 0;
     bool prev_vsync = false, first_vsync = true;

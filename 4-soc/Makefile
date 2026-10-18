@@ -56,6 +56,11 @@ shell: verilator
 	@echo ""
 	cd verilog/verilator/obj_dir && ./VTop -i ../../../csrc/shell.asmbin --terminal --headless
 
+# Sv32 page fault test on the Verilator build (VCD=file.vcd to dump waveforms)
+check-pagefault: verilator
+	@$(MAKE) -C csrc page_fault_test.asmbin >/dev/null
+	cd verilog/verilator/obj_dir && ./VTop -i ../../../csrc/page_fault_test.asmbin --headless $(if $(VCD),--vcd ../../../$(VCD),)
+
 # UART tests: loopback self-test + interactive echo test
 check-uart: verilator
 	@echo "🔄 Building UART binaries..."
@@ -107,4 +112,4 @@ clean:
 distclean: clean
 	$(RM) -r results
 
-.PHONY: verilator test indent sim check-vga check-uart shell compliance clean distclean
+.PHONY: verilator test indent sim check-vga check-uart check-pagefault shell compliance clean distclean

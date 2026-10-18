@@ -12,7 +12,7 @@ LD := $(CROSS_COMPILE)ld
 OBJCOPY := $(CROSS_COMPILE)objcopy
 
 # Program targets (add new programs here)
-PROGRAMS := nyancat uart shell s_mode_test
+PROGRAMS := nyancat uart shell s_mode_test page_fault_test
 BINARIES := $(PROGRAMS:%=%.asmbin)
 
 %.asmbin: %.elf
@@ -39,6 +39,12 @@ shell.asmbin: shell.c mmio.h init.o link.lds
 	$(OBJCOPY) -O binary -j .text -j .data shell.elf $@
 
 #test s mode
+# Standalone (own _start, no init.o)
+page_fault_test.asmbin: page_fault_test.S link.lds
+	$(CC) $(CFLAGS) -c -o page_fault_test.o page_fault_test.S
+	$(CROSS_COMPILE)ld -o page_fault_test.elf -T link.lds $(LDFLAGS) page_fault_test.o
+	$(OBJCOPY) -O binary -j .text.init -j .text -j .rodata -j .data page_fault_test.elf $@
+
 s_mode_test.asmbin: s_mode_test.S init.o link.lds
 	$(CC) $(CFLAGS) -c -o s_mode_test.o s_mode_test.S
 	$(CROSS_COMPILE)ld -o s_mode_test.elf -T link.lds $(LDFLAGS) s_mode_test.o init.o
