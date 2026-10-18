@@ -193,7 +193,11 @@ class InstructionFetch extends Module {
   // - Cycle N+1: Jump moves to EX, ID flushed, stall begins
   // Without shadow registers, pending_jump can't capture the jump because
   // by the time stall activates, jump_flag_id is already 0 (ID was flushed).
-  val prev_jump_flag = RegNext(io.jump_flag_id && !io.trap_flag, false.B) // jump in ID is squashed by a trap
+  // A jump already applied last cycle (taken, or BTB already at the target) must not be
+  // latched again: PC is at the target, and re-taking it after the stall fetches the
+  // target twice (seen: sret to a faulting load, then an ITLB walk stall -> load ran twice).
+  val jump_applied   = Wire(Bool())
+  val prev_jump_flag = RegNext(io.jump_flag_id && !io.trap_flag && !jump_applied, false.B) // jump in ID is squashed by a trap
   val prev_jump_addr = RegNext(io.jump_address_id, 0.U)
 
   // Latch jump when stall blocks it
@@ -214,6 +218,7 @@ class InstructionFetch extends Module {
   val take_pending = pending_jump && !io.stall_flag_ctrl
   // Skip current jump if BTB already predicted correctly - IF already at correct target
   val take_current = io.jump_flag_id && !io.stall_flag_ctrl && !pending_jump && !io.btb_correct_prediction
+  jump_applied := take_current || (io.jump_flag_id && !io.stall_flag_ctrl && io.btb_correct_prediction)
   // BTB misprediction correction: redirect to correct PC
   val take_btb_correction = io.btb_mispredict && !io.stall_flag_ctrl
 
