@@ -361,6 +361,7 @@ int main(int argc, char **argv)
     const char *binary = nullptr;
     bool headless = false;
     bool interactive_mode = false;
+    uint64_t max_cycles_arg = 0;  // --max-cycles N (0 = default)
     for (int i = 1; i < argc; i++) {
         if ((!strcmp(argv[i], "-instruction") || !strcmp(argv[i], "-i")) &&
             i + 1 < argc)
@@ -371,6 +372,8 @@ int main(int argc, char **argv)
             interactive_mode = true;
         else if (!strcmp(argv[i], "--vcd") && i + 1 < argc)
             vcd_path = argv[++i];
+        else if (!strcmp(argv[i], "--max-cycles") && i + 1 < argc)
+            max_cycles_arg = strtoull(argv[++i], nullptr, 0);
 
     }
 
@@ -390,7 +393,9 @@ int main(int argc, char **argv)
             << "Usage: " << argv[0]
             << " -i <binary.asmbin> [--headless|-H] [--terminal|-t]\n"
             << "  --headless: Skip VGA display\n"
-            << "  --terminal: Interactive UART terminal (Ctrl-C to exit)\n";
+            << "  --terminal: Interactive UART terminal (Ctrl-C to exit)\n"
+            << "  --vcd <file>: Dump waveforms\n"
+            << "  --max-cycles <N>: Stop after N cycles\n";
         return 1;
     }
     try {
@@ -421,7 +426,8 @@ int main(int argc, char **argv)
 
     // Interactive terminal mode: no cycle limit (user exits with Ctrl-C)
     // Batch mode: 500M cycles to prevent runaway simulations
-    const uint64_t max_cycles = interactive_mode ? UINT64_MAX : 500000000ULL;
+    const uint64_t max_cycles = max_cycles_arg ? max_cycles_arg
+                                : interactive_mode ? UINT64_MAX : 500000000ULL;
     uint64_t cycle = 0, last_report = 0, frames = 0;
     uint32_t vga_div = 0;
     bool prev_vsync = false, first_vsync = true;

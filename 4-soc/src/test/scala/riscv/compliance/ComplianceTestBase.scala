@@ -141,11 +141,14 @@ abstract class ComplianceTestBase extends AnyFlatSpec with ChiselScalatestTester
     // Extract signature region from ELF symbol table
     val (beginSig, endSig) = ElfSignatureExtractor.extractSignatureRange(elfFile)
 
-    // Construct absolute path to test.asmbin from elfFile's directory
-    // The elfFile is like ".../dut/dut.elf" and test.asmbin is in the same directory
+    // asmbinFile is either next to the ELF (".../dut/test.asmbin") or, as the RISCOF
+    // batch plugin passes it, a resource name ("test_000.asmbin" copied into
+    // src/main/resources). InstructionROM falls back to the classpath for the latter.
     val elfPath            = java.nio.file.Paths.get(elfFile)
     val testDir            = elfPath.getParent
-    val absoluteAsmbinPath = testDir.resolve(asmbinFile).toAbsolutePath.toString
+    val besideElf          = testDir.resolve(asmbinFile)
+    val absoluteAsmbinPath =
+      if (java.nio.file.Files.exists(besideElf)) besideElf.toAbsolutePath.toString else asmbinFile
 
     // Instantiate 4-soc CPU (pipelined with AXI4-Lite)
     test(new TestTopModule(absoluteAsmbinPath)).withAnnotations(annos) { c =>
