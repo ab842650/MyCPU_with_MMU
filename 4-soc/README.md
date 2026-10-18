@@ -1,11 +1,13 @@
 # 4-soc: System-on-Chip with AXI4-Lite Bus
 
-RISC-V RV32I processor with AXI4-Lite bus interface, VGA, and UART peripherals.
+RISC-V RV32I processor with AXI4-Lite bus interface, Sv32 virtual memory, VGA, and UART peripherals.
 
 ## Features
 
 - CPU: 5-stage pipelined RISC-V RV32I with forwarding and branch prediction
 - Branch Prediction: BTB (32-entry) + RAS (4-entry) + IndirectBTB (8-entry) for reduced penalties
+- Privilege: M and S modes, `medeleg` delegation, `mret`/`sret`, S-mode CSRs (`sstatus`, `stvec`, `sepc`, `scause`, `stval`, `sscratch`, `satp`)
+- MMU: Sv32 with split I/D TLBs (2-way, 8 sets each, 4KB and 4MB pages), hardware page table walker, precise page faults, `sfence.vma`
 - Bus: AXI4-Lite protocol with master/slave state machines
 - Peripherals:
   - VGA: 640x480@72Hz with 64x64 framebuffer (6x scaling) and 16-color palette
@@ -16,7 +18,8 @@ RISC-V RV32I processor with AXI4-Lite bus interface, VGA, and UART peripherals.
 
 ```
 CPU (AXI4-Lite Master) + BTB (32-entry) + RAS (4-entry) + IndirectBTB (8-entry)
-  └─> BusSwitch (Address decoder, bits[31:29])
+  │    MMU: ITLB + DTLB + PTW; the PTW shares the CPU's bus port with MEM
+  └─> BusSwitch (Address decoder, bits[31:29], physical addresses)
        ├─> 0x0000_0000: Main Memory (2MB)
        ├─> 0x2000_0000: VGA Controller
        │    ├─> 0x00: ID (RO) - 0x56474131 "VGA1"
@@ -52,6 +55,13 @@ make check-vga
 # Run UART loopback test (no window)
 make check-uart
 
+# Run the Sv32 page fault test on Verilator (optionally dump a waveform)
+make check-pagefault
+make check-pagefault VCD=page_fault_test.vcd
+
+# Cycle-by-cycle checks of every trap in that waveform
+python3 scripts/check_pagefault_vcd.py page_fault_test.vcd
+
 # Interactive MyCPU shell (type 'help' for commands)
 make shell
 
@@ -67,6 +77,90 @@ make indent
 # Clean build artifacts
 make clean
 ```
+
+## Virtual Memory (Sv32 MMU)
+
+Translation is active when `satp.MODE = 1` and the hart is not in M-mode
+(M-mode accesses are never translated; `mstatus.MPRV` is not implemented).
+
+### TLBs
+
+- ITLB and DTLB: 2-way set-associative, 8 sets, round-robin replacement
+- 4KB entries are indexed by VA[14:12]; 4MB superpage entries by VA[24:22]
+- Each entry caches the outcome of its walk, so a TLB hit needs no walk:
+  - Translation (PPN) and page size
+  - Permissions: ITLB `x` (X && A), DTLB `r` (R && A) and `w` (W && A && D)
+  - `fault`: a negative entry for an invalid PTE. Every access to that page (4KB) or
+    region (4MB) faults until the entry is flushed
+- `sfence.vma` (any rs1/rs2) flushes both TLBs entirely when it reaches WB
+
+### Page Table Walker
+
+State machine in `MMU.scala` (`state` in waveforms):
+
+| Value | State | Action |
+|-------|-------|--------|
+| 0 | `sIdle` | No walk |
+| 1 | `sL1Req` | Read L1 PTE at `satp.PPN * 4096 + VPN[1] * 4` |
+| 2 | `sL1Wait` | Invalid PTE or misaligned superpage -> `sFault` (4MB); leaf -> `sLeaf` (4MB); pointer -> `sL0Req` |
+| 3 | `sL0Req` | Read L0 PTE at `PTE.PPN * 4096 + VPN[0] * 4` |
+| 4 | `sL0Wait` | Invalid or non-leaf PTE -> `sFault` (4KB); leaf -> `sLeaf` (4KB) |
+| 5 | `sLeaf` | Valid leaf: write translation and permissions into the ITLB/DTLB, return to idle |
+| 6 | `sFault` | Invalid PTE: write a fault entry into the ITLB/DTLB, return to idle |
+
+- I-side misses are walked before D-side misses
+- The pipeline stalls for the whole walk
+- A walk only starts while MEM has no bus transaction in flight, since the PTW and MEM
+  share the bus port
+
+### Page Faults
+
+Faults are raised from TLB hits (fault entry or insufficient permission), one cycle
+after the walk that filled the entry. They are precise and can be delegated to S-mode
+through `medeleg` bits 12/13/15.
+
+| Fault | Cause | Taken in | `xepc` | `xtval` |
+|-------|-------|----------|--------|---------|
+| Instruction page fault | 12 | ID (the fetch becomes a fault-tagged NOP) | faulting VA | faulting VA |
+| Load page fault | 13 | MEM | load PC | data VA |
+| Store page fault | 15 | MEM | store PC | data VA |
+
+On a load/store page fault the faulting access issues no bus request and does not write
+back. In that cycle IF2ID, ID2EX, and EX2MEM are flushed, a younger CSR write in EX is
+dropped, and the next PC is `stvec`/`mtvec`.
+
+A/D bits follow Svade: the MMU never writes PTEs. An access to a page with A=0, or a
+store to a page with D=0, raises a page fault and software sets the bits.
+
+Because invalid PTEs are cached as fault entries, a handler that fixes a PTE must run
+`sfence.vma` before returning. Otherwise the retry hits the cached fault entry and faults
+again. The privileged spec permits this behavior.
+
+### Tests
+
+- `src/test/scala/riscv/MMUTest.scala`: MMU unit tests (walks, superpages, permissions,
+  fault entries, `sfence.vma`)
+- `csrc/page_fault_test.S` (`PageFaultTest`, `make check-pagefault`): S-mode program that
+  takes load, store, and instruction page faults, checks squashing of younger
+  instructions, and fixes a PTE and retries. It reports pass bits through the
+  `sim.cpp` harness (`0xF` = pass)
+- `csrc/rv32emu_mmu/`: runs rv32emu's `tests/system/mmu` demand-paging test
+  (unmodified) with a small M-mode firmware for its `write`/`exit` syscalls:
+  ```bash
+  cd csrc/rv32emu_mmu
+  make fetch   # sparse-clone rv32emu's test sources
+  make run
+  ```
+  It currently fails, because it expects hardware A/D updates (see Known Limitations)
+
+### Known Limitations
+
+- No U-mode: `sret` always returns to S-mode, and PTE.U / `sstatus.SUM` / `sstatus.MXR`
+  are not checked
+- No hardware A/D update (Svadu). rv32emu's MMU test needs it
+- No ASIDs; `sfence.vma` always flushes the whole TLB
+- If the TLB is flushed or `satp` changes while a load/store is waiting on the bus, the
+  access is re-issued after the walk. This is harmless for RAM but repeats MMIO side effects
 
 ## AXI4-Lite Transaction Flow
 
@@ -143,6 +237,11 @@ Prediction priority (highest to lowest):
 - All peripherals implement AXI4-Lite slave interface for uniformity
 - MemoryAccess uses latched control signals to handle pipeline stall release timing
 - CPU.scala latches full bus address during transactions for stable routing
+- CLINT takes ID-stage events (xret, ecall/ebreak, instruction page fault, interrupts)
+  only in the cycle the ID instruction advances, so CSR/privilege updates happen exactly
+  once and after older instructions have finished their bus accesses
+- Verilator harness (`verilog/verilator/sim.cpp`): 16MB memory, 500M-cycle limit in
+  batch mode; a write of `0xCAFEF00D` to `0x100` ends the run with the result at `0x104`
 
 ## VGA Display Details
 
