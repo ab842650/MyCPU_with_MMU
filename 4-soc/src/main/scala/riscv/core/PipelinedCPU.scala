@@ -185,6 +185,11 @@ class PipelinedCPU extends Module {
   // When PTW Stall 
   val mem_stall = mem.io.ctrl_stall_flag || mmu.io.ptw_stall
 
+  // Data page fault in MEM: precise trap. The load/store in MEM is squashed (no bus
+  // access, no writeback) together with everything younger (IF/ID/EX), and IF is
+  // redirected to the handler. MMU only raises d_fault in a cycle without mem_stall.
+  val mem_trap = mmu.io.d_fault
+
   // Instruction memory interface
   io.instruction_address          := inst_fetch.io.instruction_address
   inst_fetch.io.stall_flag_ctrl   := ctrl.io.pc_stall || mem_stall || sfence_ctrl
@@ -213,10 +218,13 @@ class PipelinedCPU extends Module {
   // I-side: VA from IF stage
   mmu.io.i_va    := inst_fetch.io.pc_va   // == current PC (VA)
   mmu.io.i_valid := io.instruction_valid 
+  mmu.io.priv    := csr_regs.io.priv_mode_out
 
   // feed MMU result back to IF
   inst_fetch.io.mmu_i_pa    := mmu.io.i_pa
-  inst_fetch.io.mmu_fault := mmu.io.i_fault || mmu.io.d_fault
+  inst_fetch.io.mmu_fault   := mmu.io.i_fault
+  inst_fetch.io.trap_flag    := mem_trap
+  inst_fetch.io.trap_address := clint.io.id_interrupt_handler_address
 
 
 
@@ -230,6 +238,8 @@ class PipelinedCPU extends Module {
   mmu.io.d_isStore := mem.io.d_write_enable
 
   mem.io.mmu_stall := mmu.io.ptw_stall
+  mem.io.mmu_fault := mem_trap
+  mmu.io.mem_busy  := mem.io.bus_busy
 
   // BTB misprediction detection - covers multiple cases:
   // 1. BTB predicted taken, but branch not taken (wrong direction)
@@ -269,7 +279,9 @@ class PipelinedCPU extends Module {
   val btb_mispredict_pending      = RegInit(false.B)
   val btb_correction_addr_pending = RegInit(0.U(Parameters.AddrWidth))
 
-  when(mem_stall && btb_mispredict_raw) {
+  when(mem_trap) {
+    btb_mispredict_pending := false.B // squashed by the trap
+  }.elsewhen(mem_stall && btb_mispredict_raw) {
     btb_mispredict_pending      := true.B
     btb_correction_addr_pending := btb_correction_addr_raw
   }.elsewhen(btb_mispredict_pending && !mem_stall) {
@@ -410,9 +422,15 @@ class PipelinedCPU extends Module {
   val need_if_flush =
     (ctrl.io.if_flush && !prediction_correct) || btb_mispredict || ras_wrong_target || ibtb_wrong_target 
 
-  if2id.io.flush                 := need_if_flush && !mem_stall || sfence_ctrl
+  // sfence_ctrl also stalls IF, so the flushed fetch is re-fetched after the TLB flush.
+  // Like branch flushes it must wait for mem_stall: ID2EX is frozen then, and flushing
+  // IF2ID would drop the instruction in ID (e.g. the first one after sfence.vma while
+  // the PTW refills the ITLB).
+  if2id.io.flush                 := (need_if_flush || sfence_ctrl) && !mem_stall || mem_trap
   if2id.io.instruction           := inst_fetch.io.id_instruction
-  if2id.io.instruction_address   := inst_fetch.io.instruction_address
+  // ID/EX/MEM see the virtual PC (branch targets, epc); the PA only goes to memory
+  if2id.io.instruction_address   := inst_fetch.io.pc_va
+  if2id.io.if_page_fault         := inst_fetch.io.if_page_fault
   if2id.io.interrupt_flag        := io.interrupt_flag
   if2id.io.btb_predicted_taken   := inst_fetch.io.btb_predicted_taken
   if2id.io.btb_predicted_target  := inst_fetch.io.btb_predicted_target
@@ -430,7 +448,8 @@ class PipelinedCPU extends Module {
   id.io.forward_from_wb           := wb.io.regs_write_data
   id.io.reg1_forward              := forwarding.io.reg1_forward_id
   id.io.reg2_forward              := forwarding.io.reg2_forward_id
-  id.io.interrupt_assert          := clint.io.id_interrupt_assert
+  // A MEM trap redirects IF directly (inst_fetch.io.trap_flag), not via ID
+  id.io.interrupt_assert          := clint.io.id_interrupt_assert && !mem_trap
   id.io.interrupt_handler_address := clint.io.id_interrupt_handler_address
   id.io.branch_hazard             := ctrl.io.branch_hazard
 
@@ -444,7 +463,7 @@ class PipelinedCPU extends Module {
   // Without this, sw ra captures the stale register file value instead of waiting
   // for the correct forwarded PC+4 value from the JAL/JALR instruction.
   // This was the root cause of the vga_simple bug where sw ra saved 0x1050 instead of 0x125c.
-  id2ex.io.flush               := ctrl.io.id_flush && (!mem_stall || ctrl.io.jal_jalr_hazard)
+  id2ex.io.flush               := ctrl.io.id_flush && (!mem_stall || ctrl.io.jal_jalr_hazard) || mem_trap
   id2ex.io.instruction         := if2id.io.output_instruction
   id2ex.io.instruction_address := if2id.io.output_instruction_address
 
@@ -480,6 +499,7 @@ class PipelinedCPU extends Module {
   ex.io.reg2_forward        := forwarding.io.reg2_forward_ex
 
   ex2mem.io.stall               := mem_stall
+  ex2mem.io.flush               := mem_trap // squash the instruction in EX
   ex2mem.io.regs_write_enable   := id2ex.io.output_regs_write_enable
   ex2mem.io.regs_write_source   := id2ex.io.output_regs_write_source
   ex2mem.io.regs_write_address  := id2ex.io.output_regs_write_address
@@ -537,7 +557,7 @@ class PipelinedCPU extends Module {
   forwarding.io.rd_wb                := mem2wb.io.output_regs_write_address
   forwarding.io.reg_write_enable_wb  := mem2wb.io.output_regs_write_enable
 
-  clint.io.instruction_address_if := inst_fetch.io.instruction_address
+  clint.io.instruction_address_if := inst_fetch.io.pc_va
   clint.io.instruction_id         := if2id.io.output_instruction
   clint.io.jump_flag              := id.io.clint_jump_flag
   clint.io.jump_address           := id.io.clint_jump_address
@@ -545,8 +565,17 @@ class PipelinedCPU extends Module {
   clint.io.csr_bundle <> csr_regs.io.clint_access_bundle
   clint.io.priv_mode := csr_regs.io.priv_mode_out //priv mode
 
+  clint.io.if_page_fault       := if2id.io.output_if_page_fault
+  clint.io.if_fault_va         := if2id.io.output_instruction_address
+  clint.io.stall               := mem_stall || ctrl.io.if_stall // ID instruction does not advance
+  clint.io.mem_exception       := mem_trap
+  clint.io.mem_exception_cause := Mux(ex2mem.io.output_memory_write_enable, 15.U, 13.U) // store / load PF
+  clint.io.mem_exception_pc    := ex2mem.io.output_instruction_address
+  clint.io.mem_exception_tval  := mem.io.d_va
+
   csr_regs.io.reg_read_address_id    := id.io.ex_csr_address
-  csr_regs.io.reg_write_enable_ex    := id2ex.io.output_csr_write_enable
+  // The CSR instruction in EX is younger than a faulting load/store: drop its write
+  csr_regs.io.reg_write_enable_ex    := id2ex.io.output_csr_write_enable && !mem_trap
   csr_regs.io.reg_write_address_ex   := id2ex.io.output_csr_address
   csr_regs.io.reg_write_data_ex      := ex.io.csr_write_data
   csr_regs.io.debug_reg_read_address := io.csr_debug_read_address

@@ -35,18 +35,20 @@ class MMU extends Module {
     val ptw_active     = Output(Bool())
 
     val tlb_flush      = Input(Bool())
+    // MEM has a bus transaction in flight: the PTW shares that bus, so it must not
+    // start a walk until the transaction completes
+    val mem_busy       = Input(Bool())
 
-
+    /* ========= Privilege ========= */
+    val priv = Input(UInt(2.W)) // M-mode accesses are never translated (no MPRV)
   })
-
-  val fault_pending = RegInit(false.B)
 
   // ----------------------------------------
   // Basic decode
   // ----------------------------------------
   val satp_mode = io.satp(31)        // 1 = Sv32
   val satp_ppn  = io.satp(21, 0)     // root page table PPN
-  val sv32_on   = io.enable && (satp_mode === 1.U)
+  val sv32_on   = io.enable && (satp_mode === 1.U) && (io.priv =/= PrivMode.M)
 
   // ----------------------------------------
   // I-tlb 2 way asscoiate 8 set
@@ -60,6 +62,11 @@ class MMU extends Module {
   val itlb_ppn    = Reg(Vec(nSets, Vec(nWays, UInt(20.W))))   // PA[31:12] for now
   val itlb_victim = RegInit(VecInit(Seq.fill(nSets)(0.U(1.W)))) // RR victim per set
   val itlb_isSuper = RegInit(VecInit(Seq.fill(nSets)(VecInit(Seq.fill(nWays)(false.B))))) 
+  // Each entry caches the outcome of its walk, so a later hit needs no PTW:
+  //   fault = 1 : negative entry (invalid PTE on the walk) -> any access page-faults
+  //   x         : fetch allowed (X && A)
+  val itlb_fault = Reg(Vec(nSets, Vec(nWays, Bool())))
+  val itlb_x     = Reg(Vec(nSets, Vec(nWays, Bool())))
 
 
   // ===== decode VA =====
@@ -91,10 +98,20 @@ class MMU extends Module {
 
   // ===== select ppn (4KB priority) =====
   val i4k_ppn_sel = Mux(i4k_hit_w0, itlb_ppn(i_set4k)(0), itlb_ppn(i_set4k)(1))
-  val isp_ppn_sel = Mux(isp_hit_w0, itlb_ppn(i_setSp)(0), itlb_ppn(i_setSp)(1))
+  // superpage: PA[31:22] from the entry, PA[21:12] from this access's VA (the stored
+  // low bits belong to whichever VA in the 4MB region filled the entry)
+  val isp_ppn_sel = Cat(Mux(isp_hit_w0, itlb_ppn(i_setSp)(0), itlb_ppn(i_setSp)(1))(19, 10), i_vpn0)
 
   val itlb_ppn_sel = Mux(i4k_hit, i4k_ppn_sel, isp_ppn_sel)
   val itlb_pa      = Cat(itlb_ppn_sel, i_off)
+
+  // select a per-entry field of the hitting way (same priority as the ppn select)
+  def iSel(f: Vec[Vec[Bool]]): Bool =
+    Mux(i4k_hit, Mux(i4k_hit_w0, f(i_set4k)(0), f(i_set4k)(1)),
+                 Mux(isp_hit_w0, f(i_setSp)(0), f(i_setSp)(1)))
+
+  // ITLB hit on a fault entry, or on a page without execute permission
+  val itlb_hit_fault = itlb_hit && (iSel(itlb_fault) || !iSel(itlb_x))
 
   // ----------------------------------------
   // D-tlb 2 way associate 8 set
@@ -104,6 +121,10 @@ class MMU extends Module {
   val dtlb_ppn    = Reg(Vec(nSets, Vec(nWays, UInt(20.W))))   // PA[31:12] for now
   val dtlb_victim = RegInit(VecInit(Seq.fill(nSets)(0.U(1.W)))) // RR victim per set
   val dtlb_isSuper = RegInit(VecInit(Seq.fill(nSets)(VecInit(Seq.fill(nWays)(false.B)))))
+  // Same idea as the ITLB: negative entries + cached permissions
+  val dtlb_fault = Reg(Vec(nSets, Vec(nWays, Bool()))) // invalid PTE -> any access faults
+  val dtlb_r     = Reg(Vec(nSets, Vec(nWays, Bool()))) // load allowed  (R && A)
+  val dtlb_w     = Reg(Vec(nSets, Vec(nWays, Bool()))) // store allowed (W && A && D)
 
 
 
@@ -135,10 +156,18 @@ class MMU extends Module {
   val dtlb_hit = d4k_hit || dsp_hit
 
   val d4k_ppn_sel = Mux(d4k_hit_w0, dtlb_ppn(d_set4k)(0), dtlb_ppn(d_set4k)(1))
-  val dsp_ppn_sel = Mux(dsp_hit_w0, dtlb_ppn(d_setSp)(0), dtlb_ppn(d_setSp)(1))
+  val dsp_ppn_sel = Cat(Mux(dsp_hit_w0, dtlb_ppn(d_setSp)(0), dtlb_ppn(d_setSp)(1))(19, 10), d_vpn0)
 
   val dtlb_ppn_sel = Mux(d4k_hit, d4k_ppn_sel, dsp_ppn_sel)
   val dtlb_pa      = Cat(dtlb_ppn_sel, d_off)
+
+  def dSel(f: Vec[Vec[Bool]]): Bool =
+    Mux(d4k_hit, Mux(d4k_hit_w0, f(d_set4k)(0), f(d_set4k)(1)),
+                 Mux(dsp_hit_w0, f(d_setSp)(0), f(d_setSp)(1)))
+
+  // DTLB hit on a fault entry, or the access type is not permitted on this page
+  val dtlb_hit_fault = dtlb_hit && (dSel(dtlb_fault) ||
+    (io.d_isStore && !dSel(dtlb_w)) || (io.d_isLoad && !dSel(dtlb_r)))
 
   // ----------------------------------------
   // PTW FSM 
@@ -169,6 +198,7 @@ class MMU extends Module {
   val l0_base = ptePPN(pte1) << 12
   val pte0_addr = l0_base + (vpn0 << 2)
 
+  val latched_isD     = RegInit(false.B) // walk is for D-side (else I-side)
   val latched_isLoad  = RegInit(false.B)
 	val latched_isStore = RegInit(false.B)
 
@@ -191,21 +221,7 @@ class MMU extends Module {
   val leaf_level = Reg(UInt(1.W))  // 1: L1 leaf(superpage), 0: L0 leaf(4KB)
 
   // ----------------------------------------
-  // Defaults
-  // ----------------------------------------
-  io.ptw_req_valid := false.B
-  io.ptw_req_addr  := 0.U
-  io.ptw_active    := (state =/= sIdle)
-  io.ptw_stall := false.B
-
-  io.i_pa    := 0.U
-  io.i_fault := false.B
-
-  io.d_pa    := 0.U
-  io.d_fault := false.B
-
-  // ----------------------------------------
-  // Start condition: Sv32 enabled + valid fetch + idle + TLB miss
+  // Start condition: Sv32 enabled + valid access + idle + TLB miss
   // ----------------------------------------
   val i_miss = sv32_on && io.i_valid && !itlb_hit
   val d_miss = sv32_on && io.d_valid && !dtlb_hit
@@ -214,31 +230,29 @@ class MMU extends Module {
   val choose_i = i_miss
   val choose_d = !i_miss && d_miss
 
+  val start_walk  = (state === sIdle) && (choose_i || choose_d) && !io.mem_busy
 
+  // ----------------------------------------
+  // Outputs
+  // ----------------------------------------
+  io.ptw_req_valid := false.B
+  io.ptw_req_addr  := 0.U
+  io.ptw_active    := (state =/= sIdle)
 
-  val start_walk =  (state === sIdle) && (choose_i || choose_d)
-  val latched_isD = RegInit(false.B)
+  // Stall while any valid access still needs a translation, and for the whole walk
+  // (the PTW owns the bus; MEM must not start a transaction meanwhile).
+  io.ptw_stall := i_miss || d_miss || (state =/= sIdle)
 
-  // Stall policy:
-  // - Sv32 off: never stall
-  // - PTW busy: stall
-  // - idle but miss on valid fetch: stall (because we'll start PTW)
-  
-  when(!sv32_on) {
-    io.i_pa := io.i_va
-    io.d_pa := io.d_va
-    io.ptw_stall := false.B
+  io.i_pa := Mux(sv32_on, itlb_pa, io.i_va)
+  io.d_pa := Mux(sv32_on, dtlb_pa, io.d_va)
 
-  }.elsewhen(itlb_hit && (!io.d_valid || dtlb_hit)) {
-    io.i_pa := itlb_pa
-    io.d_pa := dtlb_pa
-    io.ptw_stall := false.B
-
-  }.otherwise {
-    io.i_pa := 0.U
-    io.d_pa := 0.U
-    io.ptw_stall := true.B
-  }
+  // Faults come only from TLB hits: a faulting walk fills a fault entry, and the
+  // access sees the fault on the next cycle without walking again.
+  // I-side: stays asserted while IF holds the faulting PC (until the trap redirects).
+  io.i_fault := sv32_on && itlb_hit_fault
+  // D-side: only reported when the pipeline is not frozen by an I-side walk, so the
+  // trap is taken in a cycle where the whole pipeline advances.
+  io.d_fault := sv32_on && io.d_valid && dtlb_hit_fault && !io.ptw_stall
 
   when (io.tlb_flush) {
     // cleat all tlb entries
@@ -251,6 +265,67 @@ class MMU extends Module {
       }
       itlb_victim(s) := 0.U
       dtlb_victim(s) := 0.U
+    }
+  }
+
+  // ----------------------------------------
+  // TLB fill (sLeaf: valid leaf, sFault: fault entry)
+  // ----------------------------------------
+  def fillTlb(isFault: Bool): Unit = {
+    // Svade (no hardware A/D update): A=0 -> no access, store also needs D=1
+    val a_ok = pteA(leaf_pte) && !isFault
+
+    val isSuper_fill = (leaf_level === 1.U)
+
+    val vpn1_fill = latched_va(31,22)  // 10b
+    val vpn0_fill = latched_va(21,12)  // 10b
+
+
+    val set_fill = Mux(isSuper_fill,
+      vpn1_fill(2,0),   // super: VA[24:22]
+      vpn0_fill(2,0)    // 4KB:   VA[14:12]
+    )
+
+    val tag_fill = Mux(isSuper_fill,
+      Cat(0.U(10.W), vpn1_fill(9,3)),  // super: tag in vpn1
+      latched_va(31,15)                // 4KB: tag17 = VA[31:15]
+    )
+
+    val final_ppn = Mux(isSuper_fill,
+      superpagePPN20(leaf_pte, latched_va),
+      ptePPN(leaf_pte)
+    )
+
+    when (latched_isD) {
+      // ---- DTLB fill ----
+      val d_w0_inv = !dtlb_valid(set_fill)(0)
+      val d_w1_inv = !dtlb_valid(set_fill)(1)
+      val d_way = Mux(d_w0_inv, 0.U, Mux(d_w1_inv, 1.U, dtlb_victim(set_fill)))
+
+      dtlb_valid(set_fill)(d_way) := true.B
+      dtlb_tag  (set_fill)(d_way) := tag_fill
+      dtlb_ppn  (set_fill)(d_way) := final_ppn
+      dtlb_isSuper(set_fill)(d_way) := isSuper_fill
+      dtlb_fault  (set_fill)(d_way) := isFault
+      dtlb_r      (set_fill)(d_way) := pteR(leaf_pte) && a_ok
+      dtlb_w      (set_fill)(d_way) := pteW(leaf_pte) && pteD(leaf_pte) && a_ok
+
+      // round-robin toggle (2-way)
+      dtlb_victim(set_fill) := d_way ^ 1.U
+    }.otherwise {
+      // ---- ITLB fill ----
+      val i_w0_inv = !itlb_valid(set_fill)(0)
+      val i_w1_inv = !itlb_valid(set_fill)(1)
+      val i_way = Mux(i_w0_inv, 0.U, Mux(i_w1_inv, 1.U, itlb_victim(set_fill)))
+
+      itlb_valid(set_fill)(i_way) := true.B
+      itlb_tag  (set_fill)(i_way) := tag_fill
+      itlb_ppn  (set_fill)(i_way) := final_ppn
+      itlb_isSuper(set_fill)(i_way) := isSuper_fill
+      itlb_fault  (set_fill)(i_way) := isFault
+      itlb_x      (set_fill)(i_way) := pteX(leaf_pte) && a_ok
+
+      itlb_victim(set_fill) := i_way ^ 1.U
     }
   }
 
@@ -289,16 +364,12 @@ class MMU extends Module {
         val invalid_pte = !pteV(p) || (!pteR(p) && pteW(p))
         val superpage_misaligned = (p(19,10) =/= 0.U)   // ppn0 != 0
         pte1 := p
-        when(invalid_pte) {
-          state := sFault // not valid
+        leaf_pte   := p
+        leaf_level := 1.U
+        when(invalid_pte || (isLeaf(p) && superpage_misaligned)) {
+          state := sFault // whole 4MB region is invalid -> superpage fault entry
         }.elsewhen(isLeaf(p)) {
-          when(superpage_misaligned) {
-            state := sFault
-          }.otherwise {
-            leaf_pte   := p
-            leaf_level := 1.U
-            state      := sLeaf
-          }          
+          state := sLeaf  // superpage leaf
         }.otherwise {
           // valid but non-leaf
           state := sL0Req
@@ -321,97 +392,27 @@ class MMU extends Module {
 
         val invalid_pte = !pteV(p) || (!pteR(p) && pteW(p))
 
-        when(invalid_pte) {
-          state := sFault
-        }.elsewhen(isLeaf(p)) {
-          // L0 leaf: normal 4KB
-          leaf_pte   := p
-          leaf_level := 0.U
-          state      := sLeaf
+        leaf_pte   := p
+        leaf_level := 0.U
+        when(invalid_pte || !isLeaf(p)) {
+          state := sFault // invalid, or non-leaf at the last level -> 4KB fault entry
         }.otherwise {
-          // L0 non-leaf => page fault
-          state := sFault
+          state := sLeaf  // 4KB leaf
         }
         io.ptw_req_valid := false.B
       }
     }
 
-    is(sLeaf){
-      val isFetch = !latched_isD
-      val isLoad  = latched_isD && latched_isLoad
-      val isStore = latched_isD && latched_isStore
-
-      val perm_ok = WireDefault(false.B)
-
-      when (isFetch) {
-        perm_ok := pteX(leaf_pte)
-      }.elsewhen (isLoad) {
-        perm_ok := pteR(leaf_pte)
-      }.elsewhen (isStore) {
-        perm_ok := pteW(leaf_pte)
-      }.otherwise {
-        perm_ok := false.B // unknown access type
-      }
-      when (!perm_ok) {
-        state := sFault
-      }.otherwise {
-        // A/D handling (future)
-        // TLB fill
-        val isSuper_fill = (leaf_level === 1.U)
-
-        val vpn1_fill = latched_va(31,22)  // 10b
-        val vpn0_fill = latched_va(21,12)  // 10b
-
-        
-        val set_fill = Mux(isSuper_fill,
-          vpn1_fill(2,0),   // super: VA[24:22]
-          vpn0_fill(2,0)    // 4KB:   VA[14:12]
-        )
-        
-        val tag_fill = Mux(isSuper_fill,
-          Cat(0.U(10.W), vpn1_fill(9,3)),  // super: tag in vpn1
-          latched_va(31,15)                // 4KB: tag17 = VA[31:15]
-        )
-
-        val final_ppn = Mux(isSuper_fill,
-          superpagePPN20(leaf_pte, latched_va),
-          ptePPN(leaf_pte)
-        )
-
-        when (latched_isD) {
-          // ---- DTLB fill ----
-          val d_w0_inv = !dtlb_valid(set_fill)(0)
-          val d_w1_inv = !dtlb_valid(set_fill)(1)
-          val d_way = Mux(d_w0_inv, 0.U, Mux(d_w1_inv, 1.U, dtlb_victim(set_fill)))
-
-          dtlb_valid(set_fill)(d_way) := true.B
-          dtlb_tag  (set_fill)(d_way) := tag_fill
-          dtlb_ppn  (set_fill)(d_way) := final_ppn
-          dtlb_isSuper(set_fill)(d_way) := isSuper_fill
-
-          // round-robin toggle (2-way)
-          dtlb_victim(set_fill) := d_way ^ 1.U
-        }.otherwise {
-          // ---- ITLB fill ----
-          val i_w0_inv = !itlb_valid(set_fill)(0)
-          val i_w1_inv = !itlb_valid(set_fill)(1)
-          val i_way = Mux(i_w0_inv, 0.U, Mux(i_w1_inv, 1.U, itlb_victim(set_fill)))
-
-          itlb_valid(set_fill)(i_way) := true.B
-          itlb_tag  (set_fill)(i_way) := tag_fill
-          itlb_ppn  (set_fill)(i_way) := final_ppn
-          itlb_isSuper(set_fill)(i_way) := isSuper_fill
-
-          itlb_victim(set_fill) := i_way ^ 1.U
-        }
-        state := sIdle
-      }
+    is(sLeaf) {
+      // valid leaf: cache translation + permissions (checked on the hit)
+      fillTlb(isFault = false.B)
+      state := sIdle
     }
 
     is(sFault) {
-      io.ptw_stall := false.B
-      io.i_fault := !latched_isD
-      io.d_fault :=  latched_isD
+      // invalid PTE: cache a fault entry, every access to that page/region then
+      // page-faults from the TLB (until sfence.vma)
+      fillTlb(isFault = true.B)
       state := sIdle
     }
   }

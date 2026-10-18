@@ -18,7 +18,9 @@ class MMUSpec extends AnyFlatSpec with ChiselScalatestTester {
       r: Boolean = false,
       w: Boolean = false,
       x: Boolean = false,
-      u: Boolean = false
+      u: Boolean = false,
+      a: Boolean = true, // MMU faults on A=0 (no hardware A/D update)
+      d: Boolean = true  // ... and on stores with D=0
   ): Int = {
     var pte = 0
     if (v) pte |= (1 << 0)
@@ -26,6 +28,8 @@ class MMUSpec extends AnyFlatSpec with ChiselScalatestTester {
     if (w) pte |= (1 << 2)
     if (x) pte |= (1 << 3)
     if (u) pte |= (1 << 4)
+    if (a) pte |= (1 << 6)
+    if (d) pte |= (1 << 7)
     pte |= ((ppn & 0xFFFFF) << 10)
     pte
   }
@@ -41,6 +45,35 @@ class MMUSpec extends AnyFlatSpec with ChiselScalatestTester {
     dut.io.d_va.poke(0.U)
     dut.io.d_isLoad.poke(false.B)
     dut.io.d_isStore.poke(false.B)
+  }
+
+  // After the faulting walk fills the ITLB: i_fault stays asserted (TLB hit, no stall,
+  // no re-walk) while IF keeps presenting the faulting VA; it clears when the VA changes.
+  def expectHeldIFault(dut: MMU, va: Long): Unit = {
+    for (_ <- 0 until 3) {
+      dut.clock.step(1)
+      dut.io.i_fault.expect(true.B)
+      dut.io.ptw_stall.expect(false.B)
+      dut.io.ptw_active.expect(false.B)
+      dut.io.ptw_req_valid.expect(false.B)
+    }
+    dut.io.i_va.poke((va + 0x400000).U) // different 4MB region (entry may be a superpage)
+    dut.io.i_fault.expect(false.B)
+    dut.clock.step(1)
+    dut.io.i_fault.expect(false.B)
+  }
+
+  // Walk a 1-level superpage for the D-side and return once the TLB is filled
+  def fillDSuperpage(dut: MMU, va: Long, leaf: Int, isStore: Boolean): Unit = {
+    dut.io.d_valid.poke(true.B)
+    dut.io.d_va.poke(va.U)
+    dut.io.d_isLoad.poke((!isStore).B)
+    dut.io.d_isStore.poke(isStore.B)
+    dut.clock.step(2) // L1Req -> L1Wait
+    dut.io.ptw_resp_valid.poke(true.B)
+    dut.io.ptw_resp_data.poke(leaf.U)
+    dut.clock.step(1) // -> sLeaf
+    dut.io.ptw_resp_valid.poke(false.B)
   }
 
   it should "passthrough addresses when MMU is disabled" in {
@@ -240,15 +273,11 @@ class MMUSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.ptw_resp_valid.poke(true.B)
       dut.io.ptw_resp_data.poke(invalid.U)
 
-      dut.clock.step(1) // state becomes sFault
+      dut.clock.step(1) // sFault: fault entry written
       dut.io.ptw_resp_valid.poke(false.B)
+      dut.io.ptw_stall.expect(true.B)
 
-      // In sFault cycle, i_fault is asserted for 1 cycle
-      dut.io.i_fault.expect(true.B)
-
-      dut.clock.step(1) // back to idle
-      dut.io.i_fault.expect(false.B)
-      dut.io.ptw_active.expect(false.B)
+      expectHeldIFault(dut, va)
     }
   }
 
@@ -274,15 +303,224 @@ class MMUSpec extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.ptw_resp_valid.poke(true.B)
       dut.io.ptw_resp_data.poke(nonExecLeaf.U)
 
-      dut.clock.step(1) // move into sLeaf
+      dut.clock.step(1) // sLeaf: entry cached with X=0
+      dut.io.ptw_resp_valid.poke(false.B)
+      dut.io.ptw_stall.expect(true.B)
+
+      expectHeldIFault(dut, va)
+    }
+  }
+
+  it should "fault a store to a read-only page after the walk, without stalling" in {
+    test(new MMU) { dut =>
+      dut.io.i_valid.poke(false.B)
+      dut.io.i_va.poke(0.U)
+      dut.io.enable.poke(true.B)
+      dut.io.satp.poke(makeSATP(1, 0x5).U)
       dut.io.ptw_resp_valid.poke(false.B)
 
-      dut.clock.step(1) // sLeaf decides perm_ok=false -> sFault next
+      val va = 0x00401234L
+      fillDSuperpage(dut, va, makePTE(ppn = 0x400, r = true), isStore = true)
+
+      // sLeaf: entry cached with R=1, W=0
+      dut.io.d_fault.expect(false.B)
+      dut.io.ptw_stall.expect(true.B)
+      dut.clock.step(1)
+      // DTLB hit, W=0 -> fault, pipeline released so the trap can be taken
+      dut.io.d_fault.expect(true.B)
+      dut.io.ptw_stall.expect(false.B)
+
+      // a load to the same page is fine and needs no walk (permissions are cached)
+      dut.io.d_isStore.poke(false.B)
+      dut.io.d_isLoad.poke(true.B)
+      dut.io.d_fault.expect(false.B)
+      dut.io.ptw_stall.expect(false.B)
+      dut.io.d_pa.expect(va.U)
+      dut.clock.step(1)
+      dut.io.ptw_active.expect(false.B)
+    }
+  }
+
+  it should "fault on a DTLB hit when a store hits an entry filled by a load (R only)" in {
+    test(new MMU) { dut =>
+      dut.io.i_valid.poke(false.B)
+      dut.io.i_va.poke(0.U)
+      dut.io.enable.poke(true.B)
+      dut.io.satp.poke(makeSATP(1, 0x5).U)
+      dut.io.ptw_resp_valid.poke(false.B)
+
+      val va = 0x00401234L
+      fillDSuperpage(dut, va, makePTE(ppn = 0x400, r = true), isStore = false)
+      dut.clock.step(1) // sLeaf fills DTLB
+      dut.io.ptw_stall.expect(false.B)
+      dut.io.d_fault.expect(false.B)
+      dut.io.d_pa.expect(va.U)
+
+      // Same page, now a store -> permission fault straight from the TLB, no walk
+      dut.io.d_isLoad.poke(false.B)
+      dut.io.d_isStore.poke(true.B)
+      dut.io.d_fault.expect(true.B)
+      dut.io.ptw_stall.expect(false.B)
+      dut.clock.step(1)
+      dut.io.ptw_active.expect(false.B)
+    }
+  }
+
+  it should "fault on a store to a writable page whose D bit is clear" in {
+    test(new MMU) { dut =>
+      dut.io.i_valid.poke(false.B)
+      dut.io.i_va.poke(0.U)
+      dut.io.enable.poke(true.B)
+      dut.io.satp.poke(makeSATP(1, 0x5).U)
+      dut.io.ptw_resp_valid.poke(false.B)
+
+      fillDSuperpage(dut, 0x00400000L, makePTE(ppn = 0x400, r = true, w = true, d = false), isStore = true)
+      dut.clock.step(1)
+      dut.io.d_fault.expect(true.B)
+    }
+  }
+
+  it should "not translate in M-mode even when satp.mode = Sv32" in {
+    test(new MMU) { dut =>
+      tieOffD(dut)
+      dut.io.priv.poke(PrivMode.M)
+      dut.io.enable.poke(true.B)
+      dut.io.satp.poke(makeSATP(1, 0x5).U)
+      dut.io.i_valid.poke(true.B)
+      dut.io.i_va.poke(0x12345678L.U)
+      dut.io.ptw_resp_valid.poke(false.B)
+
+      dut.io.i_pa.expect(0x12345678L.U)
+      dut.io.ptw_stall.expect(false.B)
+      dut.clock.step(1)
+      dut.io.ptw_active.expect(false.B)
+    }
+  }
+
+  it should "cache an invalid L0 PTE as a 4KB fault entry (no second walk) until sfence" in {
+    test(new MMU) { dut =>
+      dut.io.i_valid.poke(false.B)
+      dut.io.i_va.poke(0.U)
+      dut.io.enable.poke(true.B)
+      dut.io.satp.poke(makeSATP(1, 0x5).U)
+      dut.io.ptw_resp_valid.poke(false.B)
+      dut.io.tlb_flush.poke(false.B)
+
+      val va = 0x00007010L // vpn1=0 -> L1 pointer, vpn0=7 -> invalid
+      def walkToInvalidL0(): Unit = {
+        dut.io.d_valid.poke(true.B)
+        dut.io.d_va.poke(va.U)
+        dut.io.d_isLoad.poke(true.B)
+        dut.io.d_isStore.poke(false.B)
+        dut.clock.step(2) // L1Req -> L1Wait
+        dut.io.ptw_req_addr.expect(0x5000.U)
+        dut.io.ptw_resp_valid.poke(true.B)
+        dut.io.ptw_resp_data.poke(makePTE(ppn = 0x6).U) // pointer
+        dut.clock.step(1) // L0Req
+        dut.io.ptw_resp_valid.poke(false.B)
+        dut.io.ptw_req_addr.expect((0x6000 + 7 * 4).U)
+        dut.clock.step(1) // L0Wait
+        dut.io.ptw_resp_valid.poke(true.B)
+        dut.io.ptw_resp_data.poke(makePTE(ppn = 0, v = false).U)
+        dut.clock.step(1) // sFault (fault entry)
+        dut.io.ptw_resp_valid.poke(false.B)
+        dut.clock.step(1) // idle, entry valid
+      }
+
+      walkToInvalidL0()
+      dut.io.d_fault.expect(true.B)
+      dut.io.ptw_stall.expect(false.B)
+
+      // access leaves, then comes back to the same page (store this time, other offset)
+      dut.io.d_valid.poke(false.B)
+      dut.clock.step(1)
+      dut.io.d_valid.poke(true.B)
+      dut.io.d_va.poke((va + 0x20).U)
+      dut.io.d_isLoad.poke(false.B)
+      dut.io.d_isStore.poke(true.B)
+      dut.io.d_fault.expect(true.B)      // straight from the fault entry
+      dut.io.ptw_stall.expect(false.B)
+      dut.clock.step(1)
+      dut.io.ptw_active.expect(false.B)  // no walk started
+
+      // the fault entry is 4KB only: the neighbouring page still walks
+      dut.io.d_va.poke((va + 0x1000).U)
+      dut.io.d_fault.expect(false.B)
+      dut.io.ptw_stall.expect(true.B)
+      dut.io.d_valid.poke(false.B)
+      dut.clock.step(1)
+      dut.clock.step(1) // let the started walk sit; flush clears everything anyway
+
+      // sfence.vma drops the fault entry -> next access walks again
+      dut.io.tlb_flush.poke(true.B)
+      dut.clock.step(1)
+      dut.io.tlb_flush.poke(false.B)
+    }
+  }
+
+  it should "cache an invalid L1 PTE as a 4MB fault entry for the I-side" in {
+    test(new MMU) { dut =>
+      tieOffD(dut)
+      dut.io.enable.poke(true.B)
+      dut.io.satp.poke(makeSATP(1, 0x5).U)
+      dut.io.ptw_resp_valid.poke(false.B)
+      dut.io.tlb_flush.poke(false.B)
+
+      val va = 0x00800000L // vpn1=2
+      dut.io.i_valid.poke(true.B)
+      dut.io.i_va.poke(va.U)
+      dut.clock.step(2)
+      dut.io.ptw_req_addr.expect(0x5008.U)
+      dut.io.ptw_resp_valid.poke(true.B)
+      dut.io.ptw_resp_data.poke(makePTE(ppn = 0, v = false).U)
+      dut.clock.step(1) // sFault (superpage fault entry)
+      dut.io.ptw_resp_valid.poke(false.B)
+      dut.clock.step(1)
       dut.io.i_fault.expect(true.B)
 
+      // any VA inside the same 4MB region hits the same fault entry, no walk
+      dut.io.i_va.poke((va + 0x123400).U)
+      dut.io.i_fault.expect(true.B)
+      dut.io.ptw_stall.expect(false.B)
       dut.clock.step(1)
-      dut.io.i_fault.expect(false.B)
       dut.io.ptw_active.expect(false.B)
+
+      // after sfence.vma the region is walked again
+      dut.io.tlb_flush.poke(true.B)
+      dut.clock.step(1)
+      dut.io.tlb_flush.poke(false.B)
+      dut.io.i_fault.expect(false.B)
+      dut.io.ptw_stall.expect(true.B)
+      dut.clock.step(1)
+      dut.io.ptw_active.expect(true.B)
+    }
+  }
+
+  it should "translate every 4KB page of a superpage with its own VPN[0]" in {
+    test(new MMU) { dut =>
+      tieOffD(dut)
+      dut.io.enable.poke(true.B)
+      dut.io.satp.poke(makeSATP(1, 0x5).U)
+      dut.io.ptw_resp_valid.poke(false.B)
+
+      // VA 0x00808e98 (vpn1=2, vpn0=8) fills the entry; PTE maps the region to PA 0x00800000
+      dut.io.i_valid.poke(true.B)
+      dut.io.i_va.poke(0x00808e98L.U)
+      dut.clock.step(2)
+      dut.io.ptw_req_addr.expect(0x5008.U)
+      dut.io.ptw_resp_valid.poke(true.B)
+      dut.io.ptw_resp_data.poke(makePTE(ppn = 0x800, r = true, x = true).U)
+      dut.clock.step(1)
+      dut.io.ptw_resp_valid.poke(false.B)
+      dut.clock.step(1)
+      dut.io.i_pa.expect(0x00808e98L.U)
+
+      // another page of the same 4MB region hits the same entry but must keep its own vpn0
+      dut.io.i_va.poke(0x00804100L.U)
+      dut.io.ptw_stall.expect(false.B)
+      dut.io.i_pa.expect(0x00804100L.U)
+      dut.io.i_va.poke(0x00bff004L.U)
+      dut.io.i_pa.expect(0x00bff004L.U)
     }
   }
 }

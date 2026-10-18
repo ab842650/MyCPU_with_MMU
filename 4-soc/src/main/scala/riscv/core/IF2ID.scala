@@ -36,6 +36,8 @@ class IF2ID extends Module {
     val ibtb_predicted_valid  = Input(Bool())                     // IndirectBTB prediction valid from IF
     val ibtb_predicted_target = Input(UInt(Parameters.AddrWidth)) // IndirectBTB predicted target
 
+    val if_page_fault                = Input(Bool())                     // fetch of this instruction page-faulted
+
     val output_instruction           = Output(UInt(Parameters.DataWidth))
     val output_instruction_address   = Output(UInt(Parameters.AddrWidth))
     val output_interrupt_flag        = Output(UInt(Parameters.InterruptFlagWidth))
@@ -45,6 +47,7 @@ class IF2ID extends Module {
     val output_ras_predicted_target  = Output(UInt(Parameters.AddrWidth)) // RAS target to ID stage
     val output_ibtb_predicted_valid  = Output(Bool())                     // IndirectBTB prediction to ID
     val output_ibtb_predicted_target = Output(UInt(Parameters.AddrWidth)) // IndirectBTB target to ID
+    val output_if_page_fault         = Output(Bool())                     // instruction page fault to CLINT
   })
 
   val instruction = Module(new PipelineRegister(defaultValue = InstructionsNop.nop))
@@ -103,6 +106,13 @@ class IF2ID extends Module {
   ibtb_predicted_target.io.stall  := io.stall
   ibtb_predicted_target.io.flush  := io.flush
   io.output_ibtb_predicted_target := ibtb_predicted_target.io.out
+
+  // Instruction page fault tag (the instruction itself is a NOP); trapped in ID by CLINT
+  val if_page_fault = Module(new PipelineRegister(1))
+  if_page_fault.io.in     := io.if_page_fault
+  if_page_fault.io.stall  := io.stall
+  if_page_fault.io.flush  := io.flush
+  io.output_if_page_fault := if_page_fault.io.out.asBool
 
 
 }

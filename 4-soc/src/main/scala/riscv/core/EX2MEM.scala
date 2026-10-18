@@ -21,13 +21,14 @@ import riscv.Parameters
  * - funct3: Memory access width (byte/half/word) and sign-extension mode
  * - memory_*_enable: Triggers AXI4-Lite bus transactions in MEM stage
  *
- * No flush input: EX2MEM never flushes because by the time an instruction
- * reaches this point, all control hazards have been resolved. Memory stalls
- * simply hold the register contents.
+ * Flush: control hazards are resolved before this point, so EX2MEM only flushes
+ * when an older instruction in MEM traps (data page fault) and the instruction
+ * currently in EX must be squashed. Memory stalls simply hold the register contents.
  */
 class EX2MEM extends Module {
   val io = IO(new Bundle() {
     val stall               = Input(Bool())
+    val flush               = Input(Bool())
     val regs_write_enable   = Input(Bool())
     val regs_write_source   = Input(UInt(2.W))
     val regs_write_address  = Input(UInt(Parameters.AddrWidth))
@@ -54,7 +55,7 @@ class EX2MEM extends Module {
   })
 
   val stall = io.stall
-  val flush = false.B
+  val flush = io.flush
 
   val regs_write_enable = Module(new PipelineRegister(1))
   regs_write_enable.io.in     := io.regs_write_enable

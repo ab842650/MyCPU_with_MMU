@@ -31,7 +31,17 @@ class CLINT extends Module {
 
     val priv_mode = Input(UInt(2.W)) //current mode
 
+    // Instruction page fault: the instruction in ID (a NOP) was fetched from a faulting VA
+    val if_page_fault = Input(Bool())
+    val if_fault_va   = Input(UInt(Parameters.AddrWidth)) // VA of that instruction (epc & tval)
+    val stall         = Input(Bool())                     // ID instruction held this cycle: defer ID-stage events
 
+    // Load/store page fault from MEM. Older than anything in ID, so it wins over every
+    // ID-stage event; the pipeline squashes ID/EX and the faulting instruction itself.
+    val mem_exception       = Input(Bool())
+    val mem_exception_cause = Input(UInt(Parameters.DataWidth))  // 13 = load PF, 15 = store PF
+    val mem_exception_pc    = Input(UInt(Parameters.AddrWidth))  // VA of the load/store
+    val mem_exception_tval  = Input(UInt(Parameters.AddrWidth))  // faulting data VA
 
     val csr_bundle = new CSRDirectAccessBundle
   })
@@ -40,9 +50,15 @@ class CLINT extends Module {
   val interrupt_enable_external = io.csr_bundle.mie(11)    // MEIE bit (external enable)
 
 
-      //page fault
-  val is_if_page_fault = false.B
-  val if_pf_cause     = 12.U  // Instruction page fault
+  // page fault
+  val is_mem_exc       = io.mem_exception
+  // ID-stage events (xret, ecall/ebreak, instruction page fault, interrupts) are taken
+  // only in the cycle the ID instruction actually leaves ID. Otherwise the CSR/priv
+  // update happens while older instructions are still in flight (e.g. sret switching
+  // to S-mode under an M-mode load in MEM) and is repeated on every stalled cycle.
+  val id_event_ok      = !io.stall && !is_mem_exc
+  val is_if_page_fault = io.if_page_fault && id_event_ok
+  val if_pf_cause      = 12.U  // Instruction page fault
 
   //val cur_priv = Mux(io.priv_mode === 0.U, PrivMode.M, io.priv_mode) // for testing
 
@@ -119,22 +135,32 @@ class CLINT extends Module {
 
 
   // 1) classify events
-  val is_mret = (io.instruction_id === InstructionsRet.mret)
-  val is_sret = (io.instruction_id === InstructionsRet.sret)
+  // ID-stage events are squashed when an older instruction in MEM traps
+  val is_mret = (io.instruction_id === InstructionsRet.mret) && id_event_ok
+  val is_sret = (io.instruction_id === InstructionsRet.sret) && id_event_ok
 
-  val has_exc = (io.instruction_id === InstructionsEnv.ecall) || (io.instruction_id === InstructionsEnv.ebreak || is_if_page_fault)
+  val id_env_exc = ((io.instruction_id === InstructionsEnv.ecall) || (io.instruction_id === InstructionsEnv.ebreak)) && id_event_ok
+  val has_exc    = is_mem_exc || is_if_page_fault || id_env_exc
   val excCause = Mux(
-    is_if_page_fault,
-    if_pf_cause,
-    MuxLookup(io.instruction_id, 0.U)(
-      IndexedSeq(
-        InstructionsEnv.ecall  -> Mux(cur_priv === PrivMode.M, 11.U, 9.U),
-        InstructionsEnv.ebreak -> 3.U
+    is_mem_exc,
+    io.mem_exception_cause,
+    Mux(
+      is_if_page_fault,
+      if_pf_cause,
+      MuxLookup(io.instruction_id, 0.U)(
+        IndexedSeq(
+          InstructionsEnv.ecall  -> Mux(cur_priv === PrivMode.M, 11.U, 9.U),
+          InstructionsEnv.ebreak -> 3.U
+        )
       )
     )
   )
+  // Faults re-execute the faulting instruction after xret, so epc is its own address
+  val trap_epc = Mux(is_mem_exc, io.mem_exception_pc, Mux(is_if_page_fault, io.if_fault_va, instruction_address))
+  val trap_tval = Mux(is_mem_exc, io.mem_exception_tval, Mux(is_if_page_fault, io.if_fault_va, 0.U))
   // interrupts (optional; keep your existing gating)
-  val has_int = (io.interrupt_flag =/= InterruptStatus.None) && interrupt_enable_global && interrupt_source_enabled
+  val has_int = (io.interrupt_flag =/= InterruptStatus.None) && interrupt_enable_global && interrupt_source_enabled &&
+    id_event_ok
   val intCause = Mux(io.interrupt_flag(0), 0x80000007L.U, 0x8000000bL.U)
 
   val take_trap = has_exc || has_int
@@ -186,9 +212,9 @@ class CLINT extends Module {
   } .elsewhen (take_trap) {
     when (targetIsM) {
       io.csr_bundle.mstatus_write_data := mstatus_disable_interrupt
-      io.csr_bundle.mepc_write_data    := instruction_address
+      io.csr_bundle.mepc_write_data    := Mux(trap_is_exc, trap_epc, instruction_address)
       io.csr_bundle.mcause_write_data  := trap_cause
-      io.csr_bundle.mtval_write_data   := 0.U
+      io.csr_bundle.mtval_write_data   := Mux(trap_is_exc, trap_tval, 0.U)
       io.csr_bundle.direct_write_enable := true.B
 
       io.id_interrupt_assert := true.B
@@ -198,9 +224,9 @@ class CLINT extends Module {
       io.csr_bundle.priv_write_data := PrivMode.M
     } .otherwise { // targetIsS
       io.csr_bundle.sstatus_write_data := sstatus_disable_interrupt
-      io.csr_bundle.sepc_write_data    := instruction_address
+      io.csr_bundle.sepc_write_data    := trap_epc // only exceptions are delegated
       io.csr_bundle.scause_write_data  := trap_cause
-      io.csr_bundle.stval_write_data := Mux(is_if_page_fault, 0.U, 0.U)
+      io.csr_bundle.stval_write_data   := trap_tval
       io.csr_bundle.direct_write_enable_s := true.B
       io.id_interrupt_assert := true.B
       io.id_interrupt_handler_address := io.csr_bundle.stvec

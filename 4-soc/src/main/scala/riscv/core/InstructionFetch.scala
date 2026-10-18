@@ -114,11 +114,16 @@ class InstructionFetch extends Module {
     val ibtb_update_target   = Input(UInt(Parameters.AddrWidth))
     // from MMU (I-side)
     val mmu_i_pa    = Input(UInt(Parameters.AddrWidth))
-    val mmu_fault = Input(Bool())
+    val mmu_fault = Input(Bool()) // fetch at current PC raised an instruction page fault
 
     // to control / ID (for trap)
     val if_page_fault = Output(Bool())
     val pc_va   = Output(UInt(Parameters.AddrWidth)) // for stval/mtval 
+
+    // Precise trap from a later stage (MEM page fault): highest-priority redirect,
+    // taken even while the pipeline would otherwise be stalled.
+    val trap_flag    = Input(Bool())
+    val trap_address = Input(UInt(Parameters.AddrWidth))
 
   })
   val pc = RegInit(ProgramCounter.EntryAddress)
@@ -129,7 +134,9 @@ class InstructionFetch extends Module {
 
   // BTB prediction: use predicted target if BTB predicts taken
   val btb_next_pc = btb.io.predicted_pc
-  io.btb_predicted_taken  := btb.io.predicted_taken
+  // A faulting fetch becomes a NOP in ID; a stale BTB hit on it must not trigger a
+  // "mispredict" redirect that would override the page-fault trap.
+  io.btb_predicted_taken  := btb.io.predicted_taken && !io.mmu_fault
   io.btb_predicted_target := btb.io.predicted_pc
 
   // Return Address Stack for JALR return prediction
@@ -150,7 +157,7 @@ class InstructionFetch extends Module {
   val is_return   = is_jalr && is_ra_or_t0 && (jalr_rd === 0.U) // JALR rd=x0, rs1=ra/t0 is return pattern
 
   // Speculative RAS pop in IF stage when return detected and not stalled
-  val speculative_ras_pop = is_return && io.instruction_valid && !io.stall_flag_ctrl
+  val speculative_ras_pop = is_return && io.instruction_valid && !io.stall_flag_ctrl && !io.mmu_fault
 
   // RAS connections
   ras.io.push          := io.ras_push
@@ -166,7 +173,7 @@ class InstructionFetch extends Module {
 
   // IndirectBTB prediction: for non-return JALR (function pointers, vtables)
   // Only predict when instruction is JALR but not a return pattern (RAS handles returns)
-  val is_indirect_jalr    = is_jalr && !is_return && io.instruction_valid && !io.stall_flag_ctrl
+  val is_indirect_jalr    = is_jalr && !is_return && io.instruction_valid && !io.stall_flag_ctrl && !io.mmu_fault
   val ibtb_prediction_hit = ibtb.io.hit && is_indirect_jalr
 
   // IndirectBTB prediction output (for ID stage to detect misprediction)
@@ -186,7 +193,7 @@ class InstructionFetch extends Module {
   // - Cycle N+1: Jump moves to EX, ID flushed, stall begins
   // Without shadow registers, pending_jump can't capture the jump because
   // by the time stall activates, jump_flag_id is already 0 (ID was flushed).
-  val prev_jump_flag = RegNext(io.jump_flag_id, false.B)
+  val prev_jump_flag = RegNext(io.jump_flag_id && !io.trap_flag, false.B) // jump in ID is squashed by a trap
   val prev_jump_addr = RegNext(io.jump_address_id, 0.U)
 
   // Latch jump when stall blocks it
@@ -196,6 +203,10 @@ class InstructionFetch extends Module {
     pending_jump_addr := Mux(io.jump_flag_id, io.jump_address_id, prev_jump_addr)
   }.elsewhen(!io.stall_flag_ctrl) {
     // Clear pending jump when we can take it (or when there's no jump)
+    pending_jump := false.B
+  }
+  // A trap squashes every younger instruction, including any deferred jump
+  when(io.trap_flag) {
     pending_jump := false.B
   }
 
@@ -236,6 +247,7 @@ class InstructionFetch extends Module {
   val next_pc = MuxCase(
     default_next_pc,
     IndexedSeq(
+      io.trap_flag                                  -> io.trap_address,
       take_pending                                  -> pending_jump_addr,
       take_btb_correction                           -> io.btb_correction_addr,
       take_current                                  -> io.jump_address_id,

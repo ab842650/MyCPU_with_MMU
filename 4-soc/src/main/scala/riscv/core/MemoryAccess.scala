@@ -63,6 +63,8 @@ class MemoryAccess extends Module {
     val wb_regs_write_enable  = Output(Bool())
 
     val mmu_stall = Input(Bool())   // D-side translation not ready / PTW active
+    val mmu_fault = Input(Bool())   // D-side page fault: squash this load/store
+    val bus_busy  = Output(Bool())  // read/write transaction in flight (PTW must wait)
 
     val d_pa=Input(UInt(Parameters.DataWidth))
 
@@ -74,6 +76,7 @@ class MemoryAccess extends Module {
   })
   val mem_address_index = io.d_pa(log2Up(Parameters.WordSize) - 1, 0).asUInt
   val mem_access_state  = RegInit(MemoryAccessStates.Idle)
+  io.bus_busy := mem_access_state =/= MemoryAccessStates.Idle
 
   // Register to hold the loaded data across the stall release cycle
   // This ensures the data persists until MEM2WB captures it
@@ -122,7 +125,7 @@ class MemoryAccess extends Module {
 
   io.bus.request := false.B
   io.bus.read    := false.B
-  io.bus.address := io.alu_result(Parameters.AddrBits - 1, log2Up(Parameters.WordSize)) ## 0.U(
+  io.bus.address := io.d_pa(Parameters.AddrBits - 1, log2Up(Parameters.WordSize)) ## 0.U(
     log2Up(Parameters.WordSize).W
   )
   io.bus.write_data      := 0.U
@@ -224,7 +227,10 @@ class MemoryAccess extends Module {
     }
   }.otherwise {
     // Idle state: check enable signals to start new transactions
-    when(io.mmu_stall) {
+    when(io.mmu_fault) {
+      // Page fault: never start the bus transaction, don't stall; the trap squashes it
+      io.bus.request := false.B
+    }.elsewhen(io.mmu_stall) {
       // ★關鍵：MMU 還沒 ready → MEM stage 先 stall、也不准開始 transaction
       io.bus.request     := false.B
       // mem_access_state 保持 Idle
@@ -360,5 +366,6 @@ class MemoryAccess extends Module {
   // Pass to MEM2WB pipeline register for WB stage data source selection
   io.wb_regs_write_source  := wb_effective_regs_write_source
   io.wb_regs_write_address := wb_effective_regs_write_address
-  io.wb_regs_write_enable  := wb_effective_regs_write_enable
+  // A faulting load must not write back
+  io.wb_regs_write_enable  := wb_effective_regs_write_enable && !io.mmu_fault
 }
