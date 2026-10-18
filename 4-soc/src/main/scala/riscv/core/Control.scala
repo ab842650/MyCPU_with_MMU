@@ -65,7 +65,8 @@ import riscv.Parameters
  *          BEQ x1, x4, label ; uses x1 → hold 1 cycle, forward from MEM→ID
  *
  *   Note: Branch stays in ID and re-evaluates with forwarded value.
- *         No id_flush needed (unlike load-use which flushes EX).
+ *         id_flush puts the bubble in EX; without it the held instruction would
+ *         also be copied into EX (ID2EX only stalls on mem_stall).
  *
  * ----------------------------------------------------------------------------
  * 3. JAL/JALR HAZARD (3-stage detection, critical for sw ra)
@@ -388,15 +389,15 @@ class Control extends Module {
     // for the correct forwarded value. This was the root cause of the sw ra bug
     // where the wrong return address (from a previous call) was saved.
     //
-    // Branch hazards do NOT need id_flush - the branch instruction proceeds and
-    // re-evaluates with correct forwarded values once EX moves to MEM.
-    val is_load_use_hazard = io.memory_read_enable_ex &&
-      io.rd_ex =/= 0.U &&
-      (io.rd_ex === io.rs1_id || io.rd_ex === io.rs2_id)
+    // Every other stall needs the bubble too: ID2EX only stalls on mem_stall, so an
+    // instruction held in ID is otherwise also copied into EX and runs twice. A copied
+    // branch is harmless, but a copied JAL/JALR writes rd early (auipc ra; jalr ra,off(ra)
+    // then jumps to copy's PC+4 + off), and a copied ALU op/store under a store-load
+    // hazard executes twice.
     // JAL/JALR hazard: must flush to prevent capturing stale register file value
     // Includes WB stage hazard due to pipeline register delay
     val is_jal_jalr_hazard = jal_jalr_hazard_ex || jal_jalr_hazard_mem || jal_jalr_hazard_wb
-    io.id_flush := is_load_use_hazard || is_jal_jalr_hazard
+    io.id_flush := true.B
     io.pc_stall := true.B // Freeze PC (don't fetch next instruction)
     io.if_stall := true.B // Freeze IF/ID (hold fetched instruction)
     // Suppress branch decision when there's EX or MEM hazard for branch
