@@ -89,6 +89,23 @@ _start:
   addi t1, t1, 1
   blt  t1, t4, 2b
 
+  # identity leaves for the pages holding this code, so the test also runs when
+  # linked elsewhere (at 0x10000 when loaded by the UART bootloader). At 0x1000
+  # this rewrites L0[1] with the same value.
+  la   t1, _start
+  la   t4, __code_end
+  srli t1, t1, 12
+  srli t4, t4, 12
+  li   t2, L0_PT0_PA
+3:
+  slli t3, t1, 10
+  ori  t3, t3, PTE_LEAF
+  slli t0, t1, 2
+  add  t0, t0, t2
+  sw   t3, 0(t0)
+  addi t1, t1, 1
+  bleu t1, t4, 3b
+
   # L0[8] : VA 0x8000 -> PA 0x4000, read-only
   li   t0, L0_PT0_PA + 8 * 4
   li   t1, ((RESULTS >> 12) << 10) | PTE_RO
@@ -318,3 +335,4 @@ m_trap:
   sw   t1, 0(t0)
 6:
   j    6b
+__code_end:
