@@ -8,6 +8,7 @@ RISC-V RV32I processor with AXI4-Lite bus interface, Sv32 virtual memory, VGA, a
 - Branch Prediction: BTB (32-entry) + RAS (4-entry) + IndirectBTB (8-entry) for reduced penalties
 - Privilege: M and S modes, `medeleg` delegation, `mret`/`sret`, S-mode CSRs (`sstatus`, `stvec`, `sepc`, `scause`, `stval`, `sscratch`, `satp`)
 - MMU: Sv32 with split I/D TLBs (2-way, 8 sets each, 4KB and 4MB pages), hardware page table walker, precise page faults, `sfence.vma`
+- Boot: UART bootloader that receives a program, checks it, and jumps to it
 - Bus: AXI4-Lite protocol with master/slave state machines
 - Peripherals:
   - VGA: 640x480@72Hz with 64x64 framebuffer (6x scaling) and 16-color palette
@@ -70,6 +71,10 @@ make sim BINARY=csrc/nyancat.asmbin
 
 # Run RISCOF compliance tests (RV32I + Zicsr: 119/119 pass)
 make compliance
+
+# Load uart.c through the UART bootloader / run the bootloader tests
+make -C csrc/boot run-app
+make -C csrc/boot boot-test
 
 # Stop a simulation after N cycles (e.g. to keep a VCD small)
 verilog/verilator/obj_dir/VTop -i csrc/uart.asmbin --headless --max-cycles 100000
@@ -187,6 +192,94 @@ again. The privileged spec permits this behavior.
 - No ASIDs; `sfence.vma` always flushes the whole TLB
 - If the TLB is flushed or `satp` changes while a load/store is waiting on the bus, the
   access is re-issued after the walk. This is harmless for RAM but repeats MMIO side effects
+
+## UART Bootloader
+
+`make sim` places a program in RAM through a testbench backdoor before reset. A real chip
+has no such path, so `csrc/boot/` adds a bootloader: it runs at 0x1000, receives a
+program over UART, writes it to RAM with ordinary stores, and jumps to it. This also
+exercises UART RX, the bus write path, and fetching from RAM that was just written.
+
+```
+reset -> start.S -> boot.c: banner, header, checks, payload, checksum, fence.i, jalr
+                                                                            |
+                                    program at 0x10000: init.S -> main() <--+
+```
+
+### Memory Layout
+
+| Range | Use |
+|---|---|
+| 0x0000_1000 - 0x0000_FFFF | Bootloader code and data; its stack grows down from 0x10000 |
+| 0x0001_0000 - 0x000F_FFFF | Loaded program (`csrc/boot/app.lds` links programs at 0x10000) |
+| 0x0010_0000 and above | Loaded program's `.bss` and stack (as in `csrc/link.lds`) |
+
+### Image Format
+
+`csrc/boot/mkimg.py` builds an image from a raw binary. The header is five little-endian
+`uint32` fields, followed by the payload:
+
+| Field | Meaning |
+|---|---|
+| `magic` | `0x5550434D` ("MCPU") |
+| `load_addr` | Where the payload is written |
+| `entry` | Where execution starts |
+| `length` | Payload size in bytes |
+| `checksum` | Sum of all payload bytes, mod 2^32 |
+
+Before receiving the payload, the bootloader rejects images whose payload is outside
+0x10000-0x100000 (checked as `length <= limit - load_addr`, so `load_addr + length`
+cannot overflow), or whose entry is outside the payload or not 4-byte aligned. On any
+error it prints `ERR: <reason>` and halts. It does not try to receive another image,
+because after a bad header it cannot tell where the payload ends.
+
+### Flow Control
+
+The UART has a 4-byte RX FIFO and no flow control, so bytes that arrive while the CPU is
+not reading RX are dropped. Two rules follow:
+
+- The host must wait for the banner (`MyCPU bootloader`) before sending
+- The bootloader prints nothing between the header and the end of the payload. Printing
+  one character takes as long as receiving one byte
+
+### Simulator Options
+
+`sim.cpp` sends a file to UART RX with `--uart-in`. `--uart-in-wait STR` holds the file
+until the CPU prints `STR`. After the file has been sent, RX returns to TX loopback, so a
+loaded program can run its loopback self-test.
+
+```bash
+cd csrc/boot
+python3 mkimg.py app.bin app.img                # load and entry at 0x10000
+make run IMG=app.img                            # bootloader + app.img over UART
+make page_fault_app.img && make run IMG=page_fault_app.img   # Sv32 test via the bootloader
+```
+
+`--max-cycles` counts half clock cycles. One UART byte takes about 9.5K of them, so a
+1.3KB image needs about 13M.
+
+### Tests
+
+`make -C csrc/boot boot-test` sends a good image and six broken variants, and checks the
+bootloader's output for each:
+
+| Case | Expected |
+|---|---|
+| Good image (`uart.c` linked at 0x10000) | `TEST PASSED` |
+| Bad magic | `ERR: bad magic` |
+| One payload bit flipped | `ERR: bad checksum` |
+| `load_addr` = 0x1000 | `ERR: bad load_addr` |
+| `length` = 0xFFFFFFF0 | `ERR: payload out of range` |
+| `entry` at the end of the payload | `ERR: entry out of range` |
+| `entry` not 4-byte aligned | `ERR: entry not aligned` |
+
+### Limitations
+
+- One contiguous segment per image. rv32emu's MMU test (`csrc/rv32emu_mmu/`) has about
+  10KB of content spread from 0x0 to 0x802010; as a single segment it is 8MB, and it
+  also overlaps the bootloader at 0x1000. Loading it would need a multi-segment format
+- Plain byte sum instead of CRC, and no ACK/NAK or retransmission
+- No timeout: the bootloader waits for an image forever
 
 ## AXI4-Lite Transaction Flow
 
