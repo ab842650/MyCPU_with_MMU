@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <queue>
+#include <string>
 #include <vector>
 
 // Terminal I/O for interactive UART
@@ -73,6 +74,28 @@ class UartTerminal
     uint8_t rx_bit_idx = 0;
     uint8_t rx_shift = 0;
     std::queue<uint8_t> rx_fifo;
+    std::vector<uint8_t> rx_hold;  // --uart-in data held until rx_wait is seen
+    std::string rx_wait;
+    std::string tx_tail;           // last bytes the CPU sent, to match rx_wait
+
+    void release_input()
+    {
+        for (uint8_t b : rx_hold)
+            rx_fifo.push(b);
+        rx_hold.clear();
+        rx_wait.clear();
+    }
+
+    void match_wait(uint8_t c)
+    {
+        if (rx_wait.empty())
+            return;
+        tx_tail.push_back(static_cast<char>(c));
+        if (tx_tail.size() > rx_wait.size())
+            tx_tail.erase(0, tx_tail.size() - rx_wait.size());
+        if (tx_tail == rx_wait)
+            release_input();
+    }
 
     // Timing: cycles per bit at 50MHz / 115200 baud
     // UART.scala: BIT_CNT = ((freq + baud/2) / baud - 1) = 433
@@ -145,7 +168,28 @@ public:
         }
     }
 
-    size_t rx_pending() const { return rx_fifo.size(); }
+    // Queue a whole file for transmission to CPU (--uart-in). With a non-empty
+    // `wait`, hold it until the CPU has printed `wait`: the UART has a 4-byte RX
+    // FIFO and no flow control, so bytes sent before the CPU polls RX are lost.
+    void load_input(const char *path, const std::string &wait)
+    {
+        std::ifstream f(path, std::ios::binary);
+        if (!f)
+            throw std::runtime_error(std::string("Cannot open ") + path);
+        char c;
+        while (f.get(c))
+            rx_hold.push_back(static_cast<uint8_t>(c));
+        rx_wait = wait;
+        if (rx_wait.empty())
+            release_input();
+    }
+
+    size_t rx_pending() const { return rx_fifo.size() + rx_hold.size(); }
+    // Everything queued has been fully shifted out on the RX line
+    bool rx_done() const
+    {
+        return rx_fifo.empty() && rx_hold.empty() && rx_state == RxState::IDLE;
+    }
     bool got_ctrl_c() const { return ctrl_c_received; }
     bool sent_ctrl_c() const { return ctrl_c_sent; }
     bool tx_is_idle() const { return tx_state == TxState::IDLE; }
@@ -240,6 +284,7 @@ public:
                             (tx_data >= 32 && tx_data < 127) ? tx_data : '.');
                 putchar(tx_data);
                 fflush(stdout);
+                match_wait(tx_data);
                 tx_state = TxState::IDLE;
             }
             break;
@@ -362,6 +407,8 @@ int main(int argc, char **argv)
     bool headless = false;
     bool interactive_mode = false;
     uint64_t max_cycles_arg = 0;  // --max-cycles N (0 = default)
+    const char *uart_in_path = nullptr;  // --uart-in FILE: feed FILE into UART RX
+    const char *uart_in_wait = "";       // --uart-in-wait STR: ...after CPU prints STR
     for (int i = 1; i < argc; i++) {
         if ((!strcmp(argv[i], "-instruction") || !strcmp(argv[i], "-i")) &&
             i + 1 < argc)
@@ -374,6 +421,10 @@ int main(int argc, char **argv)
             vcd_path = argv[++i];
         else if (!strcmp(argv[i], "--max-cycles") && i + 1 < argc)
             max_cycles_arg = strtoull(argv[++i], nullptr, 0);
+        else if (!strcmp(argv[i], "--uart-in") && i + 1 < argc)
+            uart_in_path = argv[++i];
+        else if (!strcmp(argv[i], "--uart-in-wait") && i + 1 < argc)
+            uart_in_wait = argv[++i];
 
     }
 
@@ -395,7 +446,9 @@ int main(int argc, char **argv)
             << "  --headless: Skip VGA display\n"
             << "  --terminal: Interactive UART terminal (Ctrl-C to exit)\n"
             << "  --vcd <file>: Dump waveforms\n"
-            << "  --max-cycles <N>: Stop after N cycles\n";
+            << "  --max-cycles <N>: Stop after N cycles\n"
+            << "  --uart-in <file>: Send file contents to UART RX\n"
+            << "  --uart-in-wait <str>: ...only after the CPU prints <str>\n";
         return 1;
     }
     try {
@@ -423,6 +476,20 @@ int main(int argc, char **argv)
         std::cout.flush();
         uart.enable_raw_mode();
     }
+    if (uart_in_path) {
+        try {
+            uart.load_input(uart_in_path, uart_in_wait);
+        } catch (const std::exception &e) {
+            std::cerr << e.what() << "\n";
+            return 1;
+        }
+        std::cout << "UART input: " << uart_in_path << " (" << uart.rx_pending()
+                  << " bytes)\n";
+    }
+    // RX is driven by the UART terminal (stdin or --uart-in), else TX loopback.
+    // Once the --uart-in file has been sent, RX goes back to loopback, so a
+    // program loaded by the bootloader can run its loopback self-test.
+    bool uart_rx_driven = interactive_mode || uart_in_path;
 
     // Interactive terminal mode: no cycle limit (user exits with Ctrl-C)
     // Batch mode: 500M cycles to prevent runaway simulations
@@ -615,10 +682,13 @@ int main(int argc, char **argv)
                 if (!((cycle >> 1) & 0x3F)) {
                     uart.poll_input();
                 }
+            }
+            if (uart_rx_driven) {
                 // Advance RX state machine and get line value (only on rising
                 // edge)
                 uart.get_rx_line();
-
+            }
+            if (interactive_mode) {
                 // Track TX idle time after Ctrl-C was sent to CPU
                 // This ensures we wait for "Goodbye!" to finish transmitting
                 if (uart.sent_ctrl_c()) {
@@ -636,13 +706,16 @@ int main(int argc, char **argv)
         // =====================================================================
 
         // RX input handling
-        if (interactive_mode) {
+        if (uart_in_path && !interactive_mode && uart_rx_driven && uart.rx_done())
+            uart_rx_driven = false;
+        if (uart_rx_driven) {
             // Use UART terminal RX line
             top->io_uart_rxd = uart.current_rx_line();
 
             // Early exit when TX has been idle for a while after Ctrl-C
             // This means "Goodbye!" message has finished transmitting
-            if (uart.sent_ctrl_c() && tx_idle_cycles > TX_IDLE_EXIT_THRESHOLD) {
+            if (interactive_mode && uart.sent_ctrl_c() &&
+                tx_idle_cycles > TX_IDLE_EXIT_THRESHOLD) {
                 break;
             }
         } else {
