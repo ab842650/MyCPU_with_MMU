@@ -1,0 +1,5 @@
+# Build outputs (sources are .S/.c/.lds/.py)
+*.asmbin
+*.bin
+*.img
+*.dis
